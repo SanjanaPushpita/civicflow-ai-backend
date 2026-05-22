@@ -4,6 +4,8 @@ const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
+const savedReports = [];
+
 const helplines = {
   nationalEmergency: {
     number: "999",
@@ -25,18 +27,6 @@ const helplines = {
     number: "333",
     title: "জাতীয় তথ্য, সেবা ও অভিযোগ কেন্দ্র",
   },
-  disasterWarning: {
-    number: "1090",
-    title: "দুর্যোগের আগাম বার্তা",
-  },
-  legalAid: {
-    number: "16430",
-    title: "সরকারি আইনি সহায়তা",
-  },
-  antiCorruption: {
-    number: "106",
-    title: "দুর্নীতি দমন কমিশন",
-  },
   cyberCrime: {
     number: "16444",
     title: "সাইবার ক্রাইম হেল্পলাইন",
@@ -52,26 +42,6 @@ const helplines = {
   nid: {
     number: "105",
     title: "জাতীয় পরিচয়পত্র সেবা",
-  },
-  btrc: {
-    number: "100",
-    title: "বিটিআরসি",
-  },
-  agriculture: {
-    number: "16122",
-    title: "কৃষি কল সেন্টার",
-  },
-  railway: {
-    number: "131",
-    title: "বাংলাদেশ রেলওয়ে কল সেন্টার",
-  },
-  bangladeshBank: {
-    number: "16267",
-    title: "বাংলাদেশ ব্যাংক",
-  },
-  probashiBondhu: {
-    number: "16135",
-    title: "প্রবাস বন্ধু কল সেন্টার",
   },
 };
 
@@ -123,22 +93,47 @@ function includesAny(text, words) {
   return words.some((word) => text.includes(word));
 }
 
+function repairCommonSpeechMistakes(text) {
+  return normalize(text)
+    .replaceAll("badshah", " child ")
+    .replaceAll("badsha", " child ")
+    .replaceAll("haran", " kidnap ")
+    .replaceAll("horon", " kidnap ")
+    .replaceAll("gh", " gone ")
+    .replaceAll("বাচ্চা", " child ")
+    .replaceAll("বাচ্চাকে", " child ")
+    .replaceAll("শিশু", " child ")
+    .replaceAll("শিশুকে", " child ")
+    .replaceAll("ছেলে", " child ")
+    .replaceAll("মেয়ে", " child ")
+    .replaceAll("মেয়ে", " child ")
+    .replaceAll("নিয়ে পালিয়ে", " kidnap ")
+    .replaceAll("নিয়ে পালিয়ে", " kidnap ")
+    .replaceAll("পালিয়ে গেছে", " kidnap ")
+    .replaceAll("পালিয়ে গেছে", " kidnap ")
+    .replaceAll("অপহরণ", " kidnap ")
+    .replaceAll("অপহৃত", " kidnapped ")
+    .replaceAll("কিডন্যাপ", " kidnap ")
+    .replaceAll("নিখোঁজ", " missing ")
+    .replaceAll("পানি", " water ")
+    .replaceAll("পানির", " water ")
+    .replaceAll("ওয়াসা", " wasa ")
+    .replaceAll("ওয়াসা", " wasa ")
+    .replaceAll("আগুন", " fire ")
+    .replaceAll("ধোঁয়া", " smoke ")
+    .replaceAll("ধোঁয়া", " smoke ")
+    .replaceAll("বিদ্যুৎ", " electricity ")
+    .replaceAll("কারেন্ট", " electricity ")
+    .replaceAll("সাইবার", " cyber ")
+    .replaceAll("হ্যাক", " hack ");
+}
+
 function getSafeHelplineRoute(category, transcript) {
-  const text = normalize(`${category} ${transcript}`);
+  const text = repairCommonSpeechMistakes(`${category} ${transcript}`);
 
   if (
-    includesAny(text, [
-      "child kidnap",
-      "child kidnapping",
-      "child abduction",
-      "child missing",
-      "বাচ্চা",
-      "শিশু",
-      "অপহরণ",
-      "কিডন্যাপ",
-      "নিয়ে পালিয়ে",
-      "নিয়ে পালিয়ে",
-    ])
+    includesAny(text, ["child"]) &&
+    includesAny(text, ["kidnap", "kidnapped", "missing", "abduction"])
   ) {
     return {
       isEmergency: true,
@@ -148,17 +143,7 @@ function getSafeHelplineRoute(category, transcript) {
     };
   }
 
-  if (
-    includesAny(text, [
-      "kidnap",
-      "kidnapping",
-      "abduction",
-      "abducted",
-      "missing person",
-      "অপহরণ",
-      "কিডন্যাপ",
-    ])
-  ) {
+  if (includesAny(text, ["kidnap", "kidnapped", "missing", "abduction"])) {
     return {
       isEmergency: true,
       emergencyType: "Police / Safety Emergency",
@@ -167,7 +152,7 @@ function getSafeHelplineRoute(category, transcript) {
     };
   }
 
-  if (includesAny(text, ["fire", "smoke", "burning", "আগুন", "ধোঁয়া"])) {
+  if (includesAny(text, ["fire", "smoke", "burning"])) {
     return {
       isEmergency: true,
       emergencyType: "Fire / Rescue",
@@ -183,9 +168,6 @@ function getSafeHelplineRoute(category, transcript) {
       "injured",
       "blood",
       "medical emergency",
-      "দুর্ঘটনা",
-      "আহত",
-      "রক্ত",
     ])
   ) {
     return {
@@ -204,10 +186,6 @@ function getSafeHelplineRoute(category, transcript) {
       "theft",
       "attack",
       "danger",
-      "পুলিশ",
-      "চুরি",
-      "ছিনতাই",
-      "হামলা",
     ])
   ) {
     return {
@@ -219,17 +197,7 @@ function getSafeHelplineRoute(category, transcript) {
   }
 
   if (
-    includesAny(text, [
-      "woman",
-      "women",
-      "harassment",
-      "abuse",
-      "violence",
-      "নারী",
-      "মহিলা",
-      "নির্যাতন",
-      "হয়রানি",
-    ])
+    includesAny(text, ["woman", "women", "harassment", "abuse", "violence"])
   ) {
     return {
       isEmergency: true,
@@ -239,7 +207,7 @@ function getSafeHelplineRoute(category, transcript) {
     };
   }
 
-  if (includesAny(text, ["water", "wasa", "পানি", "ওয়াসা"])) {
+  if (includesAny(text, ["water", "wasa"])) {
     return {
       isEmergency: false,
       emergencyType: null,
@@ -248,16 +216,7 @@ function getSafeHelplineRoute(category, transcript) {
     };
   }
 
-  if (
-    includesAny(text, [
-      "electricity",
-      "power",
-      "current",
-      "dpdc",
-      "বিদ্যুৎ",
-      "কারেন্ট",
-    ])
-  ) {
+  if (includesAny(text, ["electricity", "power", "current", "dpdc"])) {
     return {
       isEmergency: false,
       emergencyType: null,
@@ -266,7 +225,7 @@ function getSafeHelplineRoute(category, transcript) {
     };
   }
 
-  if (includesAny(text, ["cyber", "hack", "fraud", "scam", "সাইবার", "হ্যাক"])) {
+  if (includesAny(text, ["cyber", "hack", "fraud", "scam"])) {
     return {
       isEmergency: false,
       emergencyType: null,
@@ -275,7 +234,7 @@ function getSafeHelplineRoute(category, transcript) {
     };
   }
 
-  if (includesAny(text, ["health", "doctor", "hospital", "medicine", "ডাক্তার", "হাসপাতাল"])) {
+  if (includesAny(text, ["health", "doctor", "hospital", "medicine"])) {
     return {
       isEmergency: false,
       emergencyType: null,
@@ -284,7 +243,7 @@ function getSafeHelplineRoute(category, transcript) {
     };
   }
 
-  if (includesAny(text, ["nid", "national id", "voter id", "এনআইডি", "পরিচয়পত্র"])) {
+  if (includesAny(text, ["nid", "national id", "voter id"])) {
     return {
       isEmergency: false,
       emergencyType: null,
@@ -358,17 +317,15 @@ async function analyzeWithGemini(transcript) {
   const prompt = `
 You are CivicFlow AI, an emergency and citizen-service routing assistant for Bangladesh.
 
-Task:
 Understand the user's report in Bangla, English, or Banglish.
 Return ONLY valid JSON.
 Do not use severity words like low, medium, high, critical.
 Do not insult or minimize the user's issue.
-Route the user to the correct help service.
 
 User transcript:
 "${transcript}"
 
-Allowed output JSON keys:
+Return only this JSON shape:
 {
   "intent": "string",
   "category": "string",
@@ -378,18 +335,14 @@ Allowed output JSON keys:
   "confidence": number
 }
 
-Important routing logic:
-- Child kidnapping / abduction / child taken away / child missing = Child Kidnapping / Abduction.
-- Fire / smoke / burning = Fire / Rescue Emergency.
-- Accident / injured / ambulance / bleeding = Medical / Ambulance Emergency.
-- Theft / robbery / attack / danger / police = Police / Crime Emergency.
-- Women or child abuse / harassment / violence = Women / Child Safety Support.
-- No water / water supply / WASA = Water Supply Problem.
-- Electricity / power / current / DPDC = Electricity Problem.
-- Cyber crime / hacked / online fraud = Cyber Crime / Online Fraud.
-- If unclear, use General Citizen Service Request.
-
-Return JSON only. No markdown.
+Routing examples:
+- Child kidnapping, child taken away, child missing = Child Kidnapping / Abduction.
+- Fire or smoke = Fire / Rescue Emergency.
+- Accident, injured, ambulance = Medical / Ambulance Emergency.
+- Theft, robbery, attack, danger = Police / Crime Emergency.
+- No water or WASA = Water Supply Problem.
+- Electricity or power issue = Electricity Problem.
+- Cyber crime or hacked = Cyber Crime / Online Fraud.
 `;
 
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(
@@ -432,28 +385,16 @@ Return JSON only. No markdown.
 }
 
 function analyzeWithRules(transcript) {
-  const text = normalize(transcript)
-    .replaceAll("বাচ্চা", " child ")
-    .replaceAll("শিশু", " child ")
-    .replaceAll("নিয়ে পালিয়ে", " kidnap ")
-    .replaceAll("নিয়ে পালিয়ে", " kidnap ")
-    .replaceAll("অপহরণ", " kidnap ")
-    .replaceAll("কিডন্যাপ", " kidnap ")
-    .replaceAll("নিখোঁজ", " missing ")
-    .replaceAll("পানি", " water ")
-    .replaceAll("আগুন", " fire ")
-    .replaceAll("বিদ্যুৎ", " electricity ")
-    .replaceAll("সাইবার", " cyber ")
-    .replaceAll("হ্যাক", " hack ");
+  const text = repairCommonSpeechMistakes(transcript);
 
   let category = "General Citizen Service Request";
 
   if (
     includesAny(text, ["child"]) &&
-    includesAny(text, ["kidnap", "missing"])
+    includesAny(text, ["kidnap", "kidnapped", "missing"])
   ) {
     category = "Child Kidnapping / Abduction";
-  } else if (includesAny(text, ["kidnap", "missing"])) {
+  } else if (includesAny(text, ["kidnap", "kidnapped", "missing"])) {
     category = "Kidnapping / Abduction";
   } else if (includesAny(text, ["fire", "smoke"])) {
     category = "Fire / Rescue Emergency";
@@ -481,12 +422,14 @@ function analyzeWithRules(transcript) {
 async function analyzeTranscript(transcript) {
   try {
     const report = await analyzeWithGemini(transcript);
+
     return {
       mode: "gemini",
       report,
     };
   } catch (error) {
     const report = analyzeWithRules(transcript);
+
     return {
       mode: "rules-fallback",
       geminiError: error.message,
@@ -522,6 +465,55 @@ async function handleAnalyzeText(req, res) {
   }
 }
 
+async function handleSubmitReport(req, res) {
+  try {
+    const body = await readJsonBody(req);
+
+    if (!body.report || typeof body.report !== "object") {
+      sendJson(res, 400, {
+        ok: false,
+        error: "Missing report object",
+      });
+      return;
+    }
+
+    const savedReport = {
+      id: `civicflow_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      createdAt: new Date().toISOString(),
+      status: String(body.status || "received"),
+      source: String(body.source || "flutter-app"),
+      transcript: body.transcript || null,
+      report: body.report,
+    };
+
+    savedReports.unshift(savedReport);
+
+    if (savedReports.length > 100) {
+      savedReports.pop();
+    }
+
+    sendJson(res, 201, {
+      ok: true,
+      message: "Report received by CivicFlow AI backend.",
+      savedReport,
+      totalReports: savedReports.length,
+    });
+  } catch (error) {
+    sendJson(res, 500, {
+      ok: false,
+      error: error.message,
+    });
+  }
+}
+
+function handleListReports(req, res) {
+  sendJson(res, 200, {
+    ok: true,
+    totalReports: savedReports.length,
+    reports: savedReports,
+  });
+}
+
 async function handleTest(req, res, url) {
   const text = url.searchParams.get("text") || "আমার এলাকায় পানি নেই";
   const result = await analyzeTranscript(text);
@@ -545,7 +537,8 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 200, {
       ok: true,
       service: "CivicFlow AI Backend",
-      message: "Use /health or /test?text=your_problem_here",
+      message:
+        "Use /health, /test?text=your_problem_here, or /api/civicflow/reports",
     });
     return;
   }
@@ -556,6 +549,7 @@ const server = http.createServer(async (req, res) => {
       service: "CivicFlow AI Backend",
       mode: GEMINI_API_KEY ? "gemini-ready" : "missing-gemini-key",
       model: GEMINI_MODEL,
+      savedReports: savedReports.length,
     });
     return;
   }
@@ -567,6 +561,16 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && url.pathname === "/api/civicflow/analyze-text") {
     await handleAnalyzeText(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/civicflow/reports") {
+    await handleSubmitReport(req, res);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/civicflow/reports") {
+    handleListReports(req, res);
     return;
   }
 
