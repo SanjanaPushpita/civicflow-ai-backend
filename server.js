@@ -7,78 +7,30 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 const savedReports = [];
 
 const helplines = {
-  nationalEmergency: {
-    number: "999",
-    title: "জাতীয় জরুরি সেবা",
-  },
-  childHelpline: {
-    number: "1098",
-    title: "চাইল্ড হেল্পলাইন",
-  },
+  nationalEmergency: { number: "999", title: "জাতীয় জরুরি সেবা" },
+  childHelpline: { number: "1098", title: "চাইল্ড হেল্পলাইন" },
   womenChildProtection: {
     number: "109",
     title: "নারী ও শিশু নির্যাতন প্রতিরোধ জাতীয় হেল্পলাইন",
   },
-  health: {
-    number: "16263",
-    title: "স্বাস্থ্য বাতায়ন",
-  },
-  nationalInfo: {
-    number: "333",
-    title: "জাতীয় তথ্য, সেবা ও অভিযোগ কেন্দ্র",
-  },
-  disasterWarning: {
-    number: "1090",
-    title: "দুর্যোগের আগাম বার্তা",
-  },
-  legalAid: {
-    number: "16430",
-    title: "সরকারি আইনি সহায়তা",
-  },
-  antiCorruption: {
-    number: "106",
-    title: "দুর্নীতি দমন কমিশন",
-  },
-  cyberCrime: {
-    number: "16444",
-    title: "সাইবার ক্রাইম হেল্পলাইন",
-  },
-  dhakaWasa: {
-    number: "16124",
-    title: "ঢাকা ওয়াসা হেল্পলাইন",
-  },
-  dpdc: {
-    number: "16116",
-    title: "ঢাকা ডিপিডিসি হেল্পলাইন",
-  },
-  nid: {
-    number: "105",
-    title: "জাতীয় পরিচয়পত্র সেবা",
-  },
-  btrc: {
-    number: "100",
-    title: "বিটিআরসি",
-  },
-  agriculture: {
-    number: "16122",
-    title: "কৃষি কল সেন্টার",
-  },
+  health: { number: "16263", title: "স্বাস্থ্য বাতায়ন" },
+  nationalInfo: { number: "333", title: "জাতীয় তথ্য, সেবা ও অভিযোগ কেন্দ্র" },
+  disasterWarning: { number: "1090", title: "দুর্যোগের আগাম বার্তা" },
+  legalAid: { number: "16430", title: "সরকারি আইনি সহায়তা" },
+  antiCorruption: { number: "106", title: "দুর্নীতি দমন কমিশন" },
+  cyberCrime: { number: "16444", title: "সাইবার ক্রাইম হেল্পলাইন" },
+  dhakaWasa: { number: "16124", title: "ঢাকা ওয়াসা হেল্পলাইন" },
+  dpdc: { number: "16116", title: "ঢাকা ডিপিডিসি হেল্পলাইন" },
+  nid: { number: "105", title: "জাতীয় পরিচয়পত্র সেবা" },
+  btrc: { number: "100", title: "বিটিআরসি" },
+  agriculture: { number: "16122", title: "কৃষি কল সেন্টার" },
   agricultureFisheriesLivestock: {
     number: "16123",
     title: "কৃষি, মৎস্য ও প্রাণিসম্পদ তথ্য",
   },
-  railway: {
-    number: "131",
-    title: "বাংলাদেশ রেলওয়ে কল সেন্টার",
-  },
-  bangladeshBank: {
-    number: "16267",
-    title: "বাংলাদেশ ব্যাংক",
-  },
-  probashiBondhu: {
-    number: "16135",
-    title: "প্রবাস বন্ধু কল সেন্টার",
-  },
+  railway: { number: "131", title: "বাংলাদেশ রেলওয়ে কল সেন্টার" },
+  bangladeshBank: { number: "16267", title: "বাংলাদেশ ব্যাংক" },
+  probashiBondhu: { number: "16135", title: "প্রবাস বন্ধু কল সেন্টার" },
 };
 
 function sendJson(res, statusCode, data) {
@@ -107,7 +59,7 @@ function readJsonBody(req) {
     req.on("data", (chunk) => {
       body += chunk.toString();
 
-      if (body.length > 1_000_000) {
+      if (body.length > 18_000_000) {
         req.destroy();
         reject(new Error("Request body too large"));
       }
@@ -149,7 +101,6 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("horon", " kidnap ")
     .replaceAll("huran", " kidnap ")
     .replaceAll("gh", " gone ")
-
     .replaceAll("দেয়ার ইজ নো", " there is no ")
     .replaceAll("দেয়ার ইজ নো", " there is no ")
     .replaceAll("দেয়ার ইজ", " there is ")
@@ -165,7 +116,6 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("এলাকা", " area ")
     .replaceAll("এলাকায়", " area ")
     .replaceAll("এলাকায়", " area ")
-
     .replaceAll("বাচ্চা", " child ")
     .replaceAll("বাচ্চাকে", " child ")
     .replaceAll("বাচ্চাটাকে", " child ")
@@ -179,7 +129,6 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("মেয়ে", " child ")
     .replaceAll("মেয়েকে", " child ")
     .replaceAll("মেয়েকে", " child ")
-
     .replaceAll("নিয়ে পালিয়ে", " kidnap ")
     .replaceAll("নিয়ে পালিয়ে", " kidnap ")
     .replaceAll("পালিয়ে গেছে", " kidnap ")
@@ -199,7 +148,6 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("নিখোঁজ", " missing ")
     .replaceAll("হারিয়ে গেছে", " missing ")
     .replaceAll("হারিয়ে গেছে", " missing ")
-
     .replaceAll("পানি", " water ")
     .replaceAll("পানির", " water ")
     .replaceAll("জল", " water ")
@@ -207,19 +155,16 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("ওয়াটার", " water ")
     .replaceAll("ওয়াসা", " wasa ")
     .replaceAll("ওয়াসা", " wasa ")
-
     .replaceAll("আগুন", " fire ")
     .replaceAll("ফায়ার", " fire ")
     .replaceAll("ফায়ার", " fire ")
     .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("জ্বলছে", " burning ")
-
     .replaceAll("বিদ্যুৎ", " electricity ")
     .replaceAll("কারেন্ট", " electricity ")
     .replaceAll("লোডশেডিং", " electricity ")
     .replaceAll("ডিপিডিসি", " dpdc ")
-
     .replaceAll("পুলিশ", " police ")
     .replaceAll("চুরি", " theft ")
     .replaceAll("ডাকাতি", " robbery ")
@@ -229,45 +174,37 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("মারধর", " attack ")
     .replaceAll("বিপদ", " danger ")
     .replaceAll("হুমকি", " threat ")
-
     .replaceAll("অ্যাম্বুলেন্স", " ambulance ")
     .replaceAll("এম্বুলেন্স", " ambulance ")
     .replaceAll("দুর্ঘটনা", " accident ")
     .replaceAll("আহত", " injured ")
     .replaceAll("রক্ত", " blood ")
     .replaceAll("অজ্ঞান", " unconscious ")
-
     .replaceAll("নারী", " woman ")
     .replaceAll("মহিলা", " woman ")
     .replaceAll("নির্যাতন", " abuse ")
     .replaceAll("হয়রানি", " harassment ")
     .replaceAll("হয়রানি", " harassment ")
     .replaceAll("সহিংসতা", " violence ")
-
     .replaceAll("সাইবার", " cyber ")
     .replaceAll("হ্যাক", " hack ")
     .replaceAll("হ্যাকড", " hacked ")
     .replaceAll("প্রতারণা", " fraud ")
     .replaceAll("ফেসবুক", " facebook ")
     .replaceAll("অনলাইন", " online ")
-
     .replaceAll("রাস্তা", " road ")
     .replaceAll("সড়ক", " road ")
     .replaceAll("সড়ক", " road ")
     .replaceAll("গর্ত", " pothole ")
-
     .replaceAll("ড্রেন", " drain ")
     .replaceAll("নালা", " drain ")
     .replaceAll("জলাবদ্ধতা", " waterlogging ")
-
     .replaceAll("ময়লা", " garbage ")
     .replaceAll("ময়লা", " garbage ")
     .replaceAll("আবর্জনা", " garbage ")
-
     .replaceAll("বাতি", " street light ")
     .replaceAll("লাইট", " street light ")
     .replaceAll("অন্ধকার", " dark street ")
-
     .replaceAll("এনআইডি", " nid ")
     .replaceAll("এন আই ডি", " nid ")
     .replaceAll("পরিচয়পত্র", " nid ")
@@ -475,11 +412,48 @@ function repairReport(report, transcript) {
   };
 }
 
-async function analyzeWithGemini(transcript) {
+async function callGemini(parts, responseMimeType = "application/json") {
   if (!GEMINI_API_KEY) {
     throw new Error("Missing GEMINI_API_KEY environment variable.");
   }
 
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(
+    GEMINI_API_KEY
+  )}`;
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts,
+        },
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        responseMimeType,
+      },
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error?.message || "Gemini API request failed.");
+  }
+
+  return (
+    data.candidates?.[0]?.content?.parts?.[0]?.text ||
+    data.candidates?.[0]?.content?.parts?.map((part) => part.text).join("") ||
+    ""
+  );
+}
+
+async function analyzeWithGemini(transcript) {
   const prompt = `
 You are CivicFlow AI, an emergency and citizen-service routing assistant for Bangladesh.
 
@@ -513,43 +487,84 @@ Routing examples:
 - Road, drain, garbage, street light = General Citizen Service Request.
 `;
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(
-    GEMINI_API_KEY
-  )}`;
-
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: prompt }],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.1,
-        responseMimeType: "application/json",
-      },
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error?.message || "Gemini API request failed.");
-  }
-
-  const text =
-    data.candidates?.[0]?.content?.parts?.[0]?.text ||
-    data.candidates?.[0]?.content?.parts?.map((part) => part.text).join("") ||
-    "";
-
+  const text = await callGemini([{ text: prompt }]);
   const rawReport = safeJsonParse(text);
 
   return repairReport(rawReport, transcript);
+}
+
+async function analyzeAudioWithGemini(audioBase64, mimeType) {
+  const prompt = `
+You are CivicFlow AI for Bangladesh.
+
+You will receive an audio recording from a citizen.
+The speaker may speak Bangla, English, or Banglish.
+Your job:
+1. Detect the spoken language.
+2. Transcribe what the user said.
+3. If Bangla, keep a clean Bangla transcript.
+4. Translate the meaning into English.
+5. Create a Banglish/Roman Bangla version if useful.
+6. Create the citizen help route.
+
+Return ONLY valid JSON with this exact shape:
+{
+  "detectedLanguage": "Bangla | English | Banglish | Mixed | Unknown",
+  "originalTranscript": "what the user said in the most natural script",
+  "banglaTranscript": "Bangla script transcript if available, otherwise empty string",
+  "englishTranslation": "English meaning",
+  "banglishRoman": "Roman Bangla / Banglish if available, otherwise empty string",
+  "report": {
+    "intent": "string",
+    "category": "string",
+    "location": "Current user area",
+    "summary": "string",
+    "recommendedAction": "string",
+    "confidence": number
+  }
+}
+
+Rules:
+- Do not use low/medium/high/critical severity words.
+- Do not minimize the user's issue.
+- Child taken away, child kidnapping, child missing = Child Kidnapping / Abduction.
+- Fire or smoke = Fire / Rescue Emergency.
+- Accident, injured, ambulance = Medical / Ambulance Emergency.
+- Theft, robbery, attack, danger = Police / Crime Emergency.
+- No water or WASA = Water Supply Problem.
+- Electricity/power issue = Electricity Problem.
+- Cyber crime, hacked, online fraud = Cyber Crime / Online Fraud.
+`;
+
+  const text = await callGemini([
+    { text: prompt },
+    {
+      inlineData: {
+        mimeType,
+        data: audioBase64,
+      },
+    },
+  ]);
+
+  const parsed = safeJsonParse(text);
+
+  const originalTranscript =
+    parsed.originalTranscript ||
+    parsed.banglaTranscript ||
+    parsed.englishTranslation ||
+    parsed.banglishRoman ||
+    "Audio transcript unavailable.";
+
+  const repairedReport = repairReport(parsed.report || {}, originalTranscript);
+
+  return {
+    detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
+    originalTranscript: String(originalTranscript),
+    banglaTranscript: String(parsed.banglaTranscript || ""),
+    englishTranslation: String(parsed.englishTranslation || ""),
+    banglishRoman: String(parsed.banglishRoman || ""),
+    report: repairedReport,
+  };
 }
 
 function analyzeWithRules(transcript) {
@@ -629,6 +644,63 @@ async function handleAnalyzeText(req, res) {
       ok: true,
       ...result,
     });
+  } catch (error) {
+    sendJson(res, 500, {
+      ok: false,
+      error: error.message,
+    });
+  }
+}
+
+async function handleAnalyzeAudio(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const audioBase64 = body.audioBase64;
+    const mimeType = body.mimeType || "audio/mp4";
+
+    if (!audioBase64 || typeof audioBase64 !== "string") {
+      sendJson(res, 400, {
+        ok: false,
+        error: "Missing audioBase64",
+      });
+      return;
+    }
+
+    try {
+      const result = await analyzeAudioWithGemini(audioBase64, mimeType);
+
+      sendJson(res, 200, {
+        ok: true,
+        mode: "gemini-audio",
+        ...result,
+      });
+    } catch (error) {
+      const fallbackReport = repairReport(
+        {
+          intent: "Audio Help Request",
+          category: "Voice Audio Needs Review",
+          location: "Current user area",
+          summary:
+            "The backend received the audio, but Gemini audio analysis is currently unavailable.",
+          recommendedAction:
+            "Try again later, or use the normal voice/text fallback.",
+          confidence: 0.0,
+        },
+        "Audio transcript unavailable."
+      );
+
+      sendJson(res, 200, {
+        ok: false,
+        mode: "audio-gemini-failed",
+        error: error.message,
+        detectedLanguage: "Unknown",
+        originalTranscript: "Audio transcript unavailable.",
+        banglaTranscript: "",
+        englishTranslation: "",
+        banglishRoman: "",
+        report: fallbackReport,
+      });
+    }
   } catch (error) {
     sendJson(res, 500, {
       ok: false,
@@ -729,7 +801,6 @@ function handleDashboard(req, res) {
     (item) => item.report && item.report.isEmergency
   ).length;
   const normalReports = totalReports - emergencyReports;
-
   const latestReport = savedReports[0];
 
   const reportCards = savedReports
@@ -854,22 +925,18 @@ function handleDashboard(req, res) {
     :root {
       --bg: #070b10;
       --surface: #101720;
-      --surface-2: #121c27;
       --border: rgba(56, 189, 248, 0.18);
       --primary: #38bdf8;
       --primary-soft: rgba(56, 189, 248, 0.11);
       --danger: #ff5a5f;
       --danger-soft: rgba(255, 90, 95, 0.13);
-      --success: #22c55e;
       --text: #f8fafc;
       --muted: #b6c2cf;
       --muted-2: #7d8b99;
       --shadow: rgba(0, 0, 0, 0.32);
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
@@ -879,10 +946,6 @@ function handleDashboard(req, res) {
         radial-gradient(circle at top right, rgba(255, 90, 95, 0.10), transparent 25%),
         var(--bg);
       color: var(--text);
-    }
-
-    a {
-      color: inherit;
     }
 
     .container {
@@ -896,9 +959,6 @@ function handleDashboard(req, res) {
       border-bottom: 1px solid var(--border);
       background: rgba(7, 11, 16, 0.72);
       backdrop-filter: blur(18px);
-      position: sticky;
-      top: 0;
-      z-index: 20;
     }
 
     .hero {
@@ -909,18 +969,23 @@ function handleDashboard(req, res) {
     }
 
     .hero-card,
-    .status-card {
-      background: linear-gradient(145deg, rgba(16, 23, 32, 0.92), rgba(18, 28, 39, 0.82));
+    .status-card,
+    .stat-card,
+    .report-card,
+    .empty {
+      background: rgba(16, 23, 32, 0.94);
       border: 1px solid var(--border);
       border-radius: 28px;
-      padding: 24px;
       box-shadow: 0 24px 50px var(--shadow);
+    }
+
+    .hero-card,
+    .status-card {
+      padding: 24px;
     }
 
     .eyebrow {
       display: inline-flex;
-      gap: 8px;
-      align-items: center;
       padding: 8px 12px;
       border-radius: 999px;
       color: var(--primary);
@@ -956,24 +1021,30 @@ function handleDashboard(req, res) {
       gap: 12px;
     }
 
-    .status-item {
+    .status-item,
+    .info-line {
       padding: 14px;
       border-radius: 18px;
       background: rgba(255, 255, 255, 0.035);
       border: 1px solid rgba(255, 255, 255, 0.06);
     }
 
-    .status-item span {
+    .status-item span,
+    .info-line span,
+    .summary span,
+    .action span,
+    .transcript span {
       display: block;
       color: var(--muted-2);
       font-size: 12px;
-      font-weight: 900;
+      font-weight: 1000;
       text-transform: uppercase;
-      letter-spacing: 0.7px;
-      margin-bottom: 6px;
+      letter-spacing: 0.65px;
+      margin-bottom: 7px;
     }
 
-    .status-item strong {
+    .status-item strong,
+    .info-line strong {
       color: var(--text);
       font-size: 14px;
       line-height: 1.4;
@@ -992,10 +1063,6 @@ function handleDashboard(req, res) {
 
     .stat-card {
       padding: 22px;
-      border-radius: 24px;
-      background: rgba(16, 23, 32, 0.92);
-      border: 1px solid var(--border);
-      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.20);
     }
 
     .stat-number {
@@ -1003,7 +1070,6 @@ function handleDashboard(req, res) {
       line-height: 1;
       font-weight: 1000;
       color: var(--primary);
-      letter-spacing: -1px;
     }
 
     .stat-card.emergency .stat-number {
@@ -1027,19 +1093,18 @@ function handleDashboard(req, res) {
     .toolbar h2 {
       margin: 0;
       font-size: 26px;
-      letter-spacing: -0.4px;
     }
 
     .toolbar p {
       margin: 6px 0 0;
       color: var(--muted);
-      line-height: 1.5;
     }
 
-    .toolbar-actions {
+    .toolbar-actions,
+    .filter-buttons {
       display: flex;
-      flex-wrap: wrap;
       gap: 10px;
+      flex-wrap: wrap;
       justify-content: flex-end;
     }
 
@@ -1080,13 +1145,6 @@ function handleDashboard(req, res) {
       font-weight: 700;
     }
 
-    .filter-buttons {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-
     .chip {
       padding: 13px 15px;
       border-radius: 999px;
@@ -1110,10 +1168,6 @@ function handleDashboard(req, res) {
 
     .report-card {
       padding: 22px;
-      border-radius: 26px;
-      background: rgba(16, 23, 32, 0.96);
-      border: 1px solid var(--border);
-      box-shadow: 0 22px 46px rgba(0, 0, 0, 0.24);
     }
 
     .report-card.hidden {
@@ -1130,7 +1184,6 @@ function handleDashboard(req, res) {
 
     .badge {
       display: inline-flex;
-      align-items: center;
       padding: 8px 12px;
       border-radius: 999px;
       font-size: 12px;
@@ -1166,7 +1219,6 @@ function handleDashboard(req, res) {
     .report-card h2 {
       margin: 0 0 16px;
       font-size: 24px;
-      letter-spacing: -0.4px;
     }
 
     .info-grid {
@@ -1174,33 +1226,6 @@ function handleDashboard(req, res) {
       grid-template-columns: repeat(2, 1fr);
       gap: 12px;
       margin-bottom: 16px;
-    }
-
-    .info-line {
-      padding: 14px;
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.035);
-      border: 1px solid rgba(255, 255, 255, 0.06);
-    }
-
-    .info-line span,
-    .summary span,
-    .action span,
-    .transcript span {
-      display: block;
-      color: var(--muted-2);
-      font-size: 12px;
-      font-weight: 1000;
-      text-transform: uppercase;
-      letter-spacing: 0.65px;
-      margin-bottom: 7px;
-    }
-
-    .info-line strong {
-      display: block;
-      color: var(--text);
-      font-size: 14px;
-      line-height: 1.4;
     }
 
     .summary,
@@ -1242,26 +1267,13 @@ function handleDashboard(req, res) {
 
     .empty {
       padding: 36px;
-      border-radius: 26px;
-      background: rgba(16, 23, 32, 0.92);
-      border: 1px dashed rgba(56, 189, 248, 0.28);
       text-align: center;
+      border-style: dashed;
     }
 
     .empty-icon {
       font-size: 40px;
       margin-bottom: 12px;
-    }
-
-    .empty h2 {
-      margin: 0 0 8px;
-      font-size: 24px;
-    }
-
-    .empty p {
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.5;
     }
 
     footer {
@@ -1273,32 +1285,17 @@ function handleDashboard(req, res) {
     }
 
     @media (max-width: 860px) {
-      .hero {
-        grid-template-columns: 1fr;
-      }
-
-      .stats {
-        grid-template-columns: 1fr;
-      }
-
-      .toolbar {
-        grid-template-columns: 1fr;
-      }
-
-      .toolbar-actions {
-        justify-content: flex-start;
-      }
-
-      .filters {
-        grid-template-columns: 1fr;
-      }
-
-      .filter-buttons {
-        justify-content: flex-start;
-      }
-
+      .hero,
+      .stats,
+      .toolbar,
+      .filters,
       .info-grid {
         grid-template-columns: 1fr;
+      }
+
+      .toolbar-actions,
+      .filter-buttons {
+        justify-content: flex-start;
       }
 
       .card-top {
@@ -1329,18 +1326,15 @@ function handleDashboard(req, res) {
         <aside class="status-card">
           <h2>System Status</h2>
           <div class="status-list">
-            <div class="status-item">
-              <span>AI Mode</span>
-              <strong>${escapeHtml(backendMode)}</strong>
-            </div>
-            <div class="status-item">
-              <span>Model</span>
-              <strong>${escapeHtml(GEMINI_MODEL)}</strong>
-            </div>
-            <div class="status-item">
-              <span>Latest Report</span>
-              <strong>${escapeHtml(latestText)}</strong>
-            </div>
+            <div class="status-item"><span>AI Mode</span><strong>${escapeHtml(
+              backendMode
+            )}</strong></div>
+            <div class="status-item"><span>Model</span><strong>${escapeHtml(
+              GEMINI_MODEL
+            )}</strong></div>
+            <div class="status-item"><span>Latest Report</span><strong>${escapeHtml(
+              latestText
+            )}</strong></div>
           </div>
         </aside>
       </section>
@@ -1350,20 +1344,9 @@ function handleDashboard(req, res) {
   <main>
     <div class="container">
       <section class="stats">
-        <div class="stat-card">
-          <div class="stat-number">${totalReports}</div>
-          <div class="stat-label">Total Reports</div>
-        </div>
-
-        <div class="stat-card emergency">
-          <div class="stat-number">${emergencyReports}</div>
-          <div class="stat-label">Emergency Routes</div>
-        </div>
-
-        <div class="stat-card">
-          <div class="stat-number">${normalReports}</div>
-          <div class="stat-label">Normal Help Routes</div>
-        </div>
+        <div class="stat-card"><div class="stat-number">${totalReports}</div><div class="stat-label">Total Reports</div></div>
+        <div class="stat-card emergency"><div class="stat-number">${emergencyReports}</div><div class="stat-label">Emergency Routes</div></div>
+        <div class="stat-card"><div class="stat-number">${normalReports}</div><div class="stat-label">Normal Help Routes</div></div>
       </section>
 
       <div class="toolbar">
@@ -1380,7 +1363,6 @@ function handleDashboard(req, res) {
 
       <section class="filters">
         <input id="searchInput" class="search" type="search" placeholder="Search by issue, helpline, status, summary..." />
-
         <div class="filter-buttons">
           <button class="chip active" data-filter="all">All</button>
           <button class="chip" data-filter="emergency">Emergency</button>
@@ -1403,7 +1385,6 @@ function handleDashboard(req, res) {
     const searchInput = document.getElementById("searchInput");
     const chips = document.querySelectorAll(".chip");
     const cards = document.querySelectorAll(".report-card");
-
     let activeFilter = "all";
 
     function applyFilters() {
@@ -1412,7 +1393,6 @@ function handleDashboard(req, res) {
       cards.forEach((card) => {
         const type = card.dataset.type;
         const search = card.dataset.search || "";
-
         const matchesFilter = activeFilter === "all" || type === activeFilter;
         const matchesSearch = !query || search.includes(query);
 
@@ -1455,7 +1435,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: "CivicFlow AI Backend",
       message:
-        "Use /health, /dashboard, /test?text=your_problem_here, or /api/civicflow/reports",
+        "Use /health, /dashboard, /test?text=your_problem_here, /api/civicflow/analyze-audio, or /api/civicflow/reports",
     });
     return;
   }
@@ -1467,6 +1447,7 @@ const server = http.createServer(async (req, res) => {
       mode: GEMINI_API_KEY ? "gemini-ready" : "missing-gemini-key",
       model: GEMINI_MODEL,
       savedReports: savedReports.length,
+      audioRoute: "/api/civicflow/analyze-audio",
     });
     return;
   }
@@ -1483,6 +1464,11 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && url.pathname === "/api/civicflow/analyze-text") {
     await handleAnalyzeText(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/civicflow/analyze-audio") {
+    await handleAnalyzeAudio(req, res);
     return;
   }
 
