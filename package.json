@@ -1,0 +1,11 @@
+{
+  "name": "civicflow-backend",
+  "version": "1.0.0",
+  "description": "CivicFlow AI backend API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "Maliha Sanjana",
+  "license": "MIT"
+}
