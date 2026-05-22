@@ -2,7 +2,7 @@ const http = require("http");
 
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
 const savedReports = [];
 
@@ -15,19 +15,12 @@ const helplines = {
   },
   health: { number: "16263", title: "স্বাস্থ্য বাতায়ন" },
   nationalInfo: { number: "333", title: "জাতীয় তথ্য, সেবা ও অভিযোগ কেন্দ্র" },
-  disasterWarning: { number: "1090", title: "দুর্যোগের আগাম বার্তা" },
-  legalAid: { number: "16430", title: "সরকারি আইনি সহায়তা" },
-  antiCorruption: { number: "106", title: "দুর্নীতি দমন কমিশন" },
   cyberCrime: { number: "16444", title: "সাইবার ক্রাইম হেল্পলাইন" },
   dhakaWasa: { number: "16124", title: "ঢাকা ওয়াসা হেল্পলাইন" },
   dpdc: { number: "16116", title: "ঢাকা ডিপিডিসি হেল্পলাইন" },
   nid: { number: "105", title: "জাতীয় পরিচয়পত্র সেবা" },
   btrc: { number: "100", title: "বিটিআরসি" },
   agriculture: { number: "16122", title: "কৃষি কল সেন্টার" },
-  agricultureFisheriesLivestock: {
-    number: "16123",
-    title: "কৃষি, মৎস্য ও প্রাণিসম্পদ তথ্য",
-  },
   railway: { number: "131", title: "বাংলাদেশ রেলওয়ে কল সেন্টার" },
   bangladeshBank: { number: "16267", title: "বাংলাদেশ ব্যাংক" },
   probashiBondhu: { number: "16135", title: "প্রবাস বন্ধু কল সেন্টার" },
@@ -412,6 +405,24 @@ function repairReport(report, transcript) {
   };
 }
 
+function isQuotaError(errorMessage) {
+  const message = String(errorMessage || "").toLowerCase();
+
+  return (
+    message.includes("quota") ||
+    message.includes("rate limit") ||
+    message.includes("resource_exhausted")
+  );
+}
+
+function cleanAiErrorMessage(errorMessage) {
+  if (isQuotaError(errorMessage)) {
+    return "Gemini AI quota is currently unavailable. The app used the fallback safety router instead.";
+  }
+
+  return "Gemini AI is temporarily unavailable. The app used the fallback safety router instead.";
+}
+
 async function callGemini(parts, responseMimeType = "application/json") {
   if (!GEMINI_API_KEY) {
     throw new Error("Missing GEMINI_API_KEY environment variable.");
@@ -499,6 +510,7 @@ You are CivicFlow AI for Bangladesh.
 
 You will receive an audio recording from a citizen.
 The speaker may speak Bangla, English, or Banglish.
+
 Your job:
 1. Detect the spoken language.
 2. Transcribe what the user said.
@@ -619,7 +631,7 @@ async function analyzeTranscript(transcript) {
 
     return {
       mode: "rules-fallback",
-      geminiError: error.message,
+      geminiError: cleanAiErrorMessage(error.message),
       report,
     };
   }
@@ -647,7 +659,7 @@ async function handleAnalyzeText(req, res) {
   } catch (error) {
     sendJson(res, 500, {
       ok: false,
-      error: error.message,
+      error: cleanAiErrorMessage(error.message),
     });
   }
 }
@@ -675,15 +687,17 @@ async function handleAnalyzeAudio(req, res) {
         ...result,
       });
     } catch (error) {
+      const cleanMessage = cleanAiErrorMessage(error.message);
+
       const fallbackReport = repairReport(
         {
           intent: "Audio Help Request",
           category: "Voice Audio Needs Review",
           location: "Current user area",
           summary:
-            "The backend received the audio, but Gemini audio analysis is currently unavailable.",
+            "The backend received the audio, but real AI audio understanding is currently unavailable.",
           recommendedAction:
-            "Try again later, or use the normal voice/text fallback.",
+            "Use fallback routing, manual review, or try again after AI quota is available.",
           confidence: 0.0,
         },
         "Audio transcript unavailable."
@@ -691,8 +705,8 @@ async function handleAnalyzeAudio(req, res) {
 
       sendJson(res, 200, {
         ok: false,
-        mode: "audio-gemini-failed",
-        error: error.message,
+        mode: "audio-ai-unavailable",
+        error: cleanMessage,
         detectedLanguage: "Unknown",
         originalTranscript: "Audio transcript unavailable.",
         banglaTranscript: "",
@@ -704,7 +718,7 @@ async function handleAnalyzeAudio(req, res) {
   } catch (error) {
     sendJson(res, 500, {
       ok: false,
-      error: error.message,
+      error: cleanAiErrorMessage(error.message),
     });
   }
 }
@@ -803,12 +817,19 @@ function handleDashboard(req, res) {
   const normalReports = totalReports - emergencyReports;
   const latestReport = savedReports[0];
 
+  const latestText = latestReport
+    ? `${latestReport.report?.category || "Report"} • ${formatDateTime(
+        latestReport.createdAt
+      )}`
+    : "No report yet";
+
+  const backendMode = GEMINI_API_KEY ? "Gemini Ready" : "Fallback Only";
+
   const reportCards = savedReports
     .map((item, index) => {
       const report = item.report || {};
       const isEmergency = Boolean(report.isEmergency);
-
-      const badgeText = isEmergency ? "Emergency Help Route" : "Help Route";
+      const badgeText = isEmergency ? "Emergency" : "Normal";
       const badgeClass = isEmergency ? "badge emergency" : "badge normal";
 
       const primaryHelp =
@@ -818,7 +839,7 @@ function handleDashboard(req, res) {
 
       const secondaryHelp =
         report.secondaryHelplineLabel && report.secondaryHelplineNumber
-          ? `<div class="info-line">
+          ? `<div class="mini-card">
               <span>Also</span>
               <strong>${escapeHtml(report.secondaryHelplineLabel)} • ${escapeHtml(
               report.secondaryHelplineNumber
@@ -827,10 +848,10 @@ function handleDashboard(req, res) {
           : "";
 
       const transcriptBlock = item.transcript
-        ? `<div class="transcript">
+        ? `<section class="text-block transcript">
             <span>Transcript</span>
             <p>${escapeHtml(item.transcript)}</p>
-          </div>`
+          </section>`
         : "";
 
       return `
@@ -843,53 +864,49 @@ function handleDashboard(req, res) {
             } ${report.helplineNumber || ""} ${item.status || ""}`
           ).toLowerCase()}"
         >
-          <div class="card-top">
+          <div class="card-head">
             <div>
               <span class="${badgeClass}">${badgeText}</span>
-              <span class="number">#${index + 1}</span>
+              <span class="report-number">#${index + 1}</span>
             </div>
             <span class="time">${escapeHtml(formatDateTime(item.createdAt))}</span>
           </div>
 
           <h2>${escapeHtml(report.category || "Unknown Issue")}</h2>
 
-          <div class="info-grid">
-            <div class="info-line">
+          <div class="mini-grid">
+            <div class="mini-card">
               <span>Status</span>
               <strong>${escapeHtml(item.status || "received")}</strong>
             </div>
-
-            <div class="info-line">
+            <div class="mini-card">
               <span>Source</span>
               <strong>${escapeHtml(item.source || "flutter-app")}</strong>
             </div>
-
-            <div class="info-line">
+            <div class="mini-card">
               <span>Area</span>
               <strong>${escapeHtml(report.location || "Unknown area")}</strong>
             </div>
-
-            <div class="info-line">
+            <div class="mini-card">
               <span>Help</span>
               <strong>${escapeHtml(primaryHelp)}</strong>
             </div>
-
             ${secondaryHelp}
           </div>
 
           ${transcriptBlock}
 
-          <div class="summary">
+          <section class="text-block">
             <span>AI Summary</span>
             <p>${escapeHtml(report.summary || "No summary available.")}</p>
-          </div>
+          </section>
 
-          <div class="action">
+          <section class="text-block action">
             <span>Recommended Action</span>
             <p>${escapeHtml(
               report.recommendedAction || "Review and route manually."
             )}</p>
-          </div>
+          </section>
 
           <p class="id">ID: ${escapeHtml(item.id)}</p>
         </article>
@@ -902,17 +919,9 @@ function handleDashboard(req, res) {
       ? `<div class="empty">
           <div class="empty-icon">📭</div>
           <h2>No reports received yet</h2>
-          <p>Submit a report from the Flutter app. It will appear here immediately after backend submission.</p>
+          <p>Submit a report from the Flutter app. It will appear here after backend submission.</p>
         </div>`
       : "";
-
-  const latestText = latestReport
-    ? `${latestReport.report?.category || "Report"} • ${formatDateTime(
-        latestReport.createdAt
-      )}`
-    : "No report yet";
-
-  const backendMode = GEMINI_API_KEY ? "Gemini Ready" : "Fallback Only";
 
   const html = `
 <!DOCTYPE html>
@@ -924,184 +933,172 @@ function handleDashboard(req, res) {
   <style>
     :root {
       --bg: #070b10;
-      --surface: #101720;
+      --side: #0d131b;
+      --surface: #111923;
+      --surface2: #151f2b;
       --border: rgba(56, 189, 248, 0.18);
       --primary: #38bdf8;
-      --primary-soft: rgba(56, 189, 248, 0.11);
       --danger: #ff5a5f;
-      --danger-soft: rgba(255, 90, 95, 0.13);
+      --success: #22c55e;
       --text: #f8fafc;
       --muted: #b6c2cf;
-      --muted-2: #7d8b99;
-      --shadow: rgba(0, 0, 0, 0.32);
+      --muted2: #7d8b99;
+      --soft: rgba(56, 189, 248, 0.10);
+      --dangerSoft: rgba(255, 90, 95, 0.13);
     }
 
     * { box-sizing: border-box; }
 
     body {
       margin: 0;
+      min-height: 100vh;
+      color: var(--text);
       font-family: Inter, Arial, Helvetica, sans-serif;
       background:
-        radial-gradient(circle at top left, rgba(56, 189, 248, 0.14), transparent 28%),
-        radial-gradient(circle at top right, rgba(255, 90, 95, 0.10), transparent 25%),
+        radial-gradient(circle at top right, rgba(56, 189, 248, 0.10), transparent 30%),
         var(--bg);
-      color: var(--text);
     }
 
-    .container {
-      width: min(1180px, 100%);
-      margin: 0 auto;
-      padding: 0 22px;
-    }
-
-    header {
-      padding: 34px 0 26px;
-      border-bottom: 1px solid var(--border);
-      background: rgba(7, 11, 16, 0.72);
-      backdrop-filter: blur(18px);
-    }
-
-    .hero {
+    .layout {
       display: grid;
-      grid-template-columns: 1.5fr 0.8fr;
-      gap: 18px;
-      align-items: stretch;
+      grid-template-columns: 310px minmax(0, 1fr);
+      min-height: 100vh;
     }
 
-    .hero-card,
-    .status-card,
-    .stat-card,
-    .report-card,
-    .empty {
-      background: rgba(16, 23, 32, 0.94);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      box-shadow: 0 24px 50px var(--shadow);
-    }
-
-    .hero-card,
-    .status-card {
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
       padding: 24px;
+      background: linear-gradient(180deg, #0d131b, #070b10);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
     }
 
-    .eyebrow {
+    .brand-pill {
       display: inline-flex;
+      align-items: center;
+      gap: 8px;
       padding: 8px 12px;
       border-radius: 999px;
       color: var(--primary);
-      background: var(--primary-soft);
-      border: 1px solid rgba(56, 189, 248, 0.24);
-      font-size: 13px;
+      background: var(--soft);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      font-size: 12px;
       font-weight: 900;
-      margin-bottom: 16px;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--primary);
     }
 
     h1 {
-      margin: 0;
-      font-size: clamp(32px, 5vw, 54px);
+      margin: 18px 0 8px;
+      font-size: 34px;
       line-height: 0.95;
-      letter-spacing: -1.6px;
+      letter-spacing: -1.2px;
     }
 
-    .subtitle {
-      margin: 16px 0 0;
+    .sidebar-text {
+      margin: 0 0 22px;
       color: var(--muted);
-      line-height: 1.6;
-      max-width: 760px;
-      font-size: 16px;
+      line-height: 1.45;
+      font-size: 14px;
     }
 
-    .status-card h2 {
-      margin: 0 0 14px;
-      font-size: 18px;
+    .side-section-title {
+      color: var(--muted2);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      font-size: 11px;
+      font-weight: 1000;
+      margin: 22px 0 10px;
     }
 
-    .status-list {
-      display: grid;
-      gap: 12px;
-    }
-
-    .status-item,
-    .info-line {
+    .side-card {
       padding: 14px;
       border-radius: 18px;
       background: rgba(255, 255, 255, 0.035);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      margin-bottom: 10px;
     }
 
-    .status-item span,
-    .info-line span,
-    .summary span,
-    .action span,
-    .transcript span {
+    .side-card span {
       display: block;
-      color: var(--muted-2);
-      font-size: 12px;
-      font-weight: 1000;
+      color: var(--muted2);
+      font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 0.65px;
-      margin-bottom: 7px;
+      letter-spacing: 0.7px;
+      font-weight: 900;
+      margin-bottom: 5px;
     }
 
-    .status-item strong,
-    .info-line strong {
+    .side-card strong {
+      display: block;
       color: var(--text);
       font-size: 14px;
       line-height: 1.4;
     }
 
-    main {
-      padding: 26px 0 46px;
-    }
-
-    .stats {
+    .side-stats {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
-      margin-bottom: 22px;
+      gap: 10px;
     }
 
-    .stat-card {
-      padding: 22px;
+    .stat {
+      padding: 16px;
+      border-radius: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
     }
 
     .stat-number {
-      font-size: 42px;
+      font-size: 34px;
       line-height: 1;
-      font-weight: 1000;
       color: var(--primary);
+      font-weight: 1000;
     }
 
-    .stat-card.emergency .stat-number {
+    .stat.danger .stat-number {
       color: var(--danger);
     }
 
     .stat-label {
-      margin-top: 10px;
+      margin-top: 6px;
       color: var(--muted);
+      font-size: 13px;
       font-weight: 900;
     }
 
-    .toolbar {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 16px;
-      align-items: end;
-      margin: 22px 0 18px;
+    .main {
+      min-width: 0;
+      padding: 24px;
     }
 
-    .toolbar h2 {
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    .topbar h2 {
       margin: 0;
-      font-size: 26px;
+      font-size: 28px;
+      letter-spacing: -0.5px;
     }
 
-    .toolbar p {
+    .topbar p {
       margin: 6px 0 0;
       color: var(--muted);
+      line-height: 1.4;
     }
 
-    .toolbar-actions,
-    .filter-buttons {
+    .actions {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
@@ -1109,15 +1106,19 @@ function handleDashboard(req, res) {
     }
 
     .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       border: 0;
       cursor: pointer;
       padding: 12px 16px;
       border-radius: 999px;
-      color: #071018;
       background: var(--primary);
+      color: #061018;
       font-weight: 1000;
       text-decoration: none;
       font-size: 14px;
+      white-space: nowrap;
     }
 
     .btn.secondary {
@@ -1128,7 +1129,7 @@ function handleDashboard(req, res) {
 
     .filters {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: minmax(0, 1fr) auto;
       gap: 12px;
       margin-bottom: 18px;
     }
@@ -1138,72 +1139,82 @@ function handleDashboard(req, res) {
       padding: 15px 16px;
       border-radius: 18px;
       border: 1px solid rgba(255, 255, 255, 0.10);
-      background: rgba(16, 23, 32, 0.86);
+      background: rgba(17, 25, 35, 0.95);
       color: var(--text);
       outline: none;
       font-size: 15px;
       font-weight: 700;
     }
 
+    .chips {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
     .chip {
       padding: 13px 15px;
       border-radius: 999px;
       border: 1px solid rgba(255, 255, 255, 0.10);
-      background: rgba(16, 23, 32, 0.86);
+      background: rgba(17, 25, 35, 0.95);
       color: var(--muted);
       cursor: pointer;
       font-weight: 1000;
     }
 
     .chip.active {
-      background: var(--primary-soft);
+      background: var(--soft);
       border-color: rgba(56, 189, 248, 0.34);
       color: var(--primary);
     }
 
     .reports {
       display: grid;
-      gap: 16px;
+      gap: 14px;
     }
 
     .report-card {
-      padding: 22px;
+      padding: 18px;
+      border-radius: 24px;
+      background: rgba(17, 25, 35, 0.96);
+      border: 1px solid var(--border);
     }
 
     .report-card.hidden {
       display: none;
     }
 
-    .card-top {
+    .card-head {
       display: flex;
       justify-content: space-between;
-      gap: 14px;
+      gap: 12px;
       align-items: center;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
     }
 
     .badge {
       display: inline-flex;
-      padding: 8px 12px;
+      padding: 7px 11px;
       border-radius: 999px;
       font-size: 12px;
       font-weight: 1000;
     }
 
     .badge.emergency {
-      background: var(--danger-soft);
+      background: var(--dangerSoft);
       color: var(--danger);
       border: 1px solid rgba(255, 90, 95, 0.36);
     }
 
     .badge.normal {
-      background: var(--primary-soft);
+      background: var(--soft);
       color: var(--primary);
       border: 1px solid rgba(56, 189, 248, 0.34);
     }
 
-    .number {
-      color: var(--muted-2);
+    .report-number {
+      color: var(--muted2);
       margin-left: 8px;
       font-size: 12px;
       font-weight: 1000;
@@ -1211,64 +1222,90 @@ function handleDashboard(req, res) {
 
     .time {
       color: var(--muted);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 900;
       text-align: right;
     }
 
     .report-card h2 {
-      margin: 0 0 16px;
-      font-size: 24px;
+      margin: 0 0 12px;
+      font-size: 22px;
+      letter-spacing: -0.35px;
     }
 
-    .info-grid {
+    .mini-grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 12px;
-      margin-bottom: 16px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
     }
 
-    .summary,
-    .action,
-    .transcript {
-      margin-top: 12px;
-      padding: 16px;
-      border-radius: 18px;
+    .mini-card {
+      padding: 12px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      min-width: 0;
+    }
+
+    .mini-card span,
+    .text-block span {
+      display: block;
+      color: var(--muted2);
+      font-size: 11px;
+      font-weight: 1000;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      margin-bottom: 6px;
+    }
+
+    .mini-card strong {
+      display: block;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .text-block {
+      margin-top: 10px;
+      padding: 14px;
+      border-radius: 16px;
       background: rgba(56, 189, 248, 0.075);
       border: 1px solid rgba(56, 189, 248, 0.14);
     }
 
-    .action {
-      background: rgba(34, 197, 94, 0.07);
-      border-color: rgba(34, 197, 94, 0.16);
-    }
-
-    .transcript {
+    .text-block.transcript {
       background: rgba(255, 255, 255, 0.035);
       border-color: rgba(255, 255, 255, 0.06);
     }
 
-    .summary p,
-    .action p,
-    .transcript p {
+    .text-block.action {
+      background: rgba(34, 197, 94, 0.07);
+      border-color: rgba(34, 197, 94, 0.16);
+    }
+
+    .text-block p {
       margin: 0;
       color: #dbe4ee;
-      line-height: 1.55;
-      font-size: 15px;
+      line-height: 1.5;
+      font-size: 14px;
     }
 
     .id {
-      margin: 14px 0 0;
-      color: var(--muted-2);
-      font-size: 12px;
+      margin: 12px 0 0;
+      color: var(--muted2);
+      font-size: 11px;
       word-break: break-all;
       font-weight: 800;
     }
 
     .empty {
-      padding: 36px;
+      padding: 34px;
+      border-radius: 24px;
+      background: rgba(17, 25, 35, 0.96);
+      border: 1px dashed rgba(56, 189, 248, 0.28);
       text-align: center;
-      border-style: dashed;
     }
 
     .empty-icon {
@@ -1276,29 +1313,56 @@ function handleDashboard(req, res) {
       margin-bottom: 12px;
     }
 
-    footer {
-      padding: 18px 0 32px;
-      color: var(--muted-2);
-      text-align: center;
-      font-size: 13px;
-      font-weight: 800;
+    .empty h2 {
+      margin: 0 0 8px;
     }
 
-    @media (max-width: 860px) {
-      .hero,
-      .stats,
-      .toolbar,
-      .filters,
-      .info-grid {
+    .empty p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    @media (max-width: 1100px) {
+      .layout {
         grid-template-columns: 1fr;
       }
 
-      .toolbar-actions,
-      .filter-buttons {
+      aside {
+        position: relative;
+        height: auto;
+      }
+
+      .side-stats {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .mini-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 720px) {
+      .main {
+        padding: 18px;
+      }
+
+      .topbar,
+      .filters {
+        grid-template-columns: 1fr;
+        display: grid;
+      }
+
+      .actions,
+      .chips {
         justify-content: flex-start;
       }
 
-      .card-top {
+      .side-stats,
+      .mini-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .card-head {
         align-items: flex-start;
         flex-direction: column;
       }
@@ -1310,60 +1374,60 @@ function handleDashboard(req, res) {
   </style>
 </head>
 <body>
-  <header>
-    <div class="container">
-      <section class="hero">
-        <div class="hero-card">
-          <div class="eyebrow">● Live Backend Dashboard</div>
-          <h1>CivicFlow AI</h1>
-          <p class="subtitle">
-            Admin-style view for reports submitted from the Flutter app.
-            This dashboard proves that the mobile app sends report data to the Render backend,
-            where authorities or admins could review the routed help requests.
-          </p>
+  <div class="layout">
+    <aside>
+      <div class="brand-pill"><span class="dot"></span> Live Backend</div>
+      <h1>CivicFlow AI</h1>
+      <p class="sidebar-text">
+        Admin dashboard for citizen reports received from the Flutter app.
+      </p>
+
+      <div class="side-section-title">System</div>
+      <div class="side-card">
+        <span>AI Mode</span>
+        <strong>${escapeHtml(backendMode)}</strong>
+      </div>
+      <div class="side-card">
+        <span>Model</span>
+        <strong>${escapeHtml(GEMINI_MODEL)}</strong>
+      </div>
+      <div class="side-card">
+        <span>Latest Report</span>
+        <strong>${escapeHtml(latestText)}</strong>
+      </div>
+
+      <div class="side-section-title">Report Summary</div>
+      <div class="side-stats">
+        <div class="stat">
+          <div class="stat-number">${totalReports}</div>
+          <div class="stat-label">Total Reports</div>
         </div>
+        <div class="stat danger">
+          <div class="stat-number">${emergencyReports}</div>
+          <div class="stat-label">Emergency Routes</div>
+        </div>
+        <div class="stat">
+          <div class="stat-number">${normalReports}</div>
+          <div class="stat-label">Normal Routes</div>
+        </div>
+      </div>
+    </aside>
 
-        <aside class="status-card">
-          <h2>System Status</h2>
-          <div class="status-list">
-            <div class="status-item"><span>AI Mode</span><strong>${escapeHtml(
-              backendMode
-            )}</strong></div>
-            <div class="status-item"><span>Model</span><strong>${escapeHtml(
-              GEMINI_MODEL
-            )}</strong></div>
-            <div class="status-item"><span>Latest Report</span><strong>${escapeHtml(
-              latestText
-            )}</strong></div>
-          </div>
-        </aside>
-      </section>
-    </div>
-  </header>
-
-  <main>
-    <div class="container">
-      <section class="stats">
-        <div class="stat-card"><div class="stat-number">${totalReports}</div><div class="stat-label">Total Reports</div></div>
-        <div class="stat-card emergency"><div class="stat-number">${emergencyReports}</div><div class="stat-label">Emergency Routes</div></div>
-        <div class="stat-card"><div class="stat-number">${normalReports}</div><div class="stat-label">Normal Help Routes</div></div>
-      </section>
-
-      <div class="toolbar">
+    <main class="main">
+      <section class="topbar">
         <div>
           <h2>Submitted Reports</h2>
-          <p>Search, filter, and review help routes submitted from the Flutter app.</p>
+          <p>Search, filter, and review citizen help routes clearly.</p>
         </div>
-
-        <div class="toolbar-actions">
+        <div class="actions">
           <a class="btn secondary" href="/api/civicflow/reports" target="_blank">View JSON</a>
           <a class="btn" href="/dashboard">Refresh</a>
         </div>
-      </div>
+      </section>
 
       <section class="filters">
         <input id="searchInput" class="search" type="search" placeholder="Search by issue, helpline, status, summary..." />
-        <div class="filter-buttons">
+        <div class="chips">
           <button class="chip active" data-filter="all">All</button>
           <button class="chip" data-filter="emergency">Emergency</button>
           <button class="chip" data-filter="normal">Normal</button>
@@ -1374,12 +1438,8 @@ function handleDashboard(req, res) {
         ${emptyState}
         ${reportCards}
       </section>
-    </div>
-  </main>
-
-  <footer>
-    CivicFlow AI Backend Dashboard • Temporary in-memory report storage for demo
-  </footer>
+    </main>
+  </div>
 
   <script>
     const searchInput = document.getElementById("searchInput");
