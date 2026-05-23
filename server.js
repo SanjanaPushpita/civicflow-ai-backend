@@ -2,7 +2,7 @@ const http = require("http");
 
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 const savedReports = [];
 
@@ -52,7 +52,7 @@ function readJsonBody(req) {
     req.on("data", (chunk) => {
       body += chunk.toString();
 
-      if (body.length > 18_000_000) {
+      if (body.length > 20_000_000) {
         req.destroy();
         reject(new Error("Request body too large"));
       }
@@ -73,7 +73,7 @@ function readJsonBody(req) {
 function normalize(text) {
   return String(text || "")
     .toLowerCase()
-    .replace(/[।,.?!:;]/g, " ")
+    .replace(/[।,.?!:;'"`]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -81,19 +81,12 @@ function normalize(text) {
 function includesAny(text, words) {
   return words.some((word) => {
     const cleanWord = String(word || "").toLowerCase().trim();
-    return cleanWord && text.includes(cleanWord);
+    return cleanWord.length > 0 && text.includes(cleanWord);
   });
 }
 
 function repairCommonSpeechMistakes(text) {
   return normalize(text)
-    .replaceAll("badshah", " child ")
-    .replaceAll("badsha", " child ")
-    .replaceAll("badsah", " child ")
-    .replaceAll("haran", " kidnap ")
-    .replaceAll("horon", " kidnap ")
-    .replaceAll("huran", " kidnap ")
-    .replaceAll("gh", " gone ")
     .replaceAll("দেয়ার ইজ নো", " there is no ")
     .replaceAll("দেয়ার ইজ নো", " there is no ")
     .replaceAll("দেয়ার ইজ", " there is ")
@@ -109,19 +102,18 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("এলাকা", " area ")
     .replaceAll("এলাকায়", " area ")
     .replaceAll("এলাকায়", " area ")
+
     .replaceAll("বাচ্চা", " child ")
     .replaceAll("বাচ্চাকে", " child ")
-    .replaceAll("বাচ্চাটাকে", " child ")
-    .replaceAll("বাচ্চাটি", " child ")
     .replaceAll("শিশু", " child ")
     .replaceAll("শিশুকে", " child ")
-    .replaceAll("শিশুটাকে", " child ")
     .replaceAll("ছেলে", " child ")
     .replaceAll("ছেলেকে", " child ")
     .replaceAll("মেয়ে", " child ")
     .replaceAll("মেয়ে", " child ")
     .replaceAll("মেয়েকে", " child ")
     .replaceAll("মেয়েকে", " child ")
+
     .replaceAll("নিয়ে পালিয়ে", " kidnap ")
     .replaceAll("নিয়ে পালিয়ে", " kidnap ")
     .replaceAll("পালিয়ে গেছে", " kidnap ")
@@ -141,6 +133,7 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("নিখোঁজ", " missing ")
     .replaceAll("হারিয়ে গেছে", " missing ")
     .replaceAll("হারিয়ে গেছে", " missing ")
+
     .replaceAll("পানি", " water ")
     .replaceAll("পানির", " water ")
     .replaceAll("জল", " water ")
@@ -148,16 +141,21 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("ওয়াটার", " water ")
     .replaceAll("ওয়াসা", " wasa ")
     .replaceAll("ওয়াসা", " wasa ")
+
     .replaceAll("আগুন", " fire ")
+    .replaceAll("আগুন লাগছে", " fire ")
+    .replaceAll("আগুন লেগেছে", " fire ")
     .replaceAll("ফায়ার", " fire ")
     .replaceAll("ফায়ার", " fire ")
     .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("জ্বলছে", " burning ")
+
     .replaceAll("বিদ্যুৎ", " electricity ")
     .replaceAll("কারেন্ট", " electricity ")
     .replaceAll("লোডশেডিং", " electricity ")
     .replaceAll("ডিপিডিসি", " dpdc ")
+
     .replaceAll("পুলিশ", " police ")
     .replaceAll("চুরি", " theft ")
     .replaceAll("ডাকাতি", " robbery ")
@@ -167,24 +165,27 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("মারধর", " attack ")
     .replaceAll("বিপদ", " danger ")
     .replaceAll("হুমকি", " threat ")
+
     .replaceAll("অ্যাম্বুলেন্স", " ambulance ")
     .replaceAll("এম্বুলেন্স", " ambulance ")
     .replaceAll("দুর্ঘটনা", " accident ")
     .replaceAll("আহত", " injured ")
     .replaceAll("রক্ত", " blood ")
     .replaceAll("অজ্ঞান", " unconscious ")
+
     .replaceAll("নারী", " woman ")
     .replaceAll("মহিলা", " woman ")
     .replaceAll("নির্যাতন", " abuse ")
     .replaceAll("হয়রানি", " harassment ")
     .replaceAll("হয়রানি", " harassment ")
     .replaceAll("সহিংসতা", " violence ")
+
     .replaceAll("সাইবার", " cyber ")
     .replaceAll("হ্যাক", " hack ")
     .replaceAll("হ্যাকড", " hacked ")
     .replaceAll("প্রতারণা", " fraud ")
-    .replaceAll("ফেসবুক", " facebook ")
     .replaceAll("অনলাইন", " online ")
+
     .replaceAll("রাস্তা", " road ")
     .replaceAll("সড়ক", " road ")
     .replaceAll("সড়ক", " road ")
@@ -195,9 +196,10 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("ময়লা", " garbage ")
     .replaceAll("ময়লা", " garbage ")
     .replaceAll("আবর্জনা", " garbage ")
-    .replaceAll("বাতি", " street light ")
-    .replaceAll("লাইট", " street light ")
-    .replaceAll("অন্ধকার", " dark street ")
+    .replaceAll("গাছ ভেঙে", " fallen tree ")
+    .replaceAll("গাছ পড়ে", " fallen tree ")
+    .replaceAll("গাছ পড়ে", " fallen tree ")
+
     .replaceAll("এনআইডি", " nid ")
     .replaceAll("এন আই ডি", " nid ")
     .replaceAll("পরিচয়পত্র", " nid ")
@@ -231,7 +233,7 @@ function getSafeHelplineRoute(category, transcript) {
   if (includesAny(text, ["fire", "smoke", "burning"])) {
     return {
       isEmergency: true,
-      emergencyType: "Fire / Rescue",
+      emergencyType: "Fire / Rescue Emergency",
       helpline: helplines.nationalEmergency,
       secondaryHelpline: null,
     };
@@ -249,7 +251,7 @@ function getSafeHelplineRoute(category, transcript) {
   ) {
     return {
       isEmergency: true,
-      emergencyType: "Medical / Ambulance",
+      emergencyType: "Medical / Ambulance Emergency",
       helpline: helplines.nationalEmergency,
       secondaryHelpline: helplines.health,
     };
@@ -268,7 +270,7 @@ function getSafeHelplineRoute(category, transcript) {
   ) {
     return {
       isEmergency: true,
-      emergencyType: "Police / Safety",
+      emergencyType: "Police / Safety Emergency",
       helpline: helplines.nationalEmergency,
       secondaryHelpline: null,
     };
@@ -405,6 +407,23 @@ function repairReport(report, transcript) {
   };
 }
 
+function buildRepeatReport(reason) {
+  return repairReport(
+    {
+      intent: "Voice Clarification Needed",
+      category: "Voice Needs Repeat",
+      location: "Current user area",
+      summary:
+        reason ||
+        "CivicFlow AI could not clearly understand the voice recording.",
+      recommendedAction:
+        "Please ask the user to repeat slowly, closer to the microphone, with less background noise.",
+      confidence: 0.0,
+    },
+    "Audio unclear"
+  );
+}
+
 function isQuotaError(errorMessage) {
   const message = String(errorMessage || "").toLowerCase();
 
@@ -445,7 +464,7 @@ async function callGemini(parts, responseMimeType = "application/json") {
         },
       ],
       generationConfig: {
-        temperature: 0.1,
+        temperature: 0,
         responseMimeType,
       },
     }),
@@ -466,17 +485,17 @@ async function callGemini(parts, responseMimeType = "application/json") {
 
 async function analyzeWithGemini(transcript) {
   const prompt = `
-You are CivicFlow AI, an emergency and citizen-service routing assistant for Bangladesh.
+You are CivicFlow AI, a Bangladesh civic and emergency help-routing assistant.
 
 Understand the user's report in Bangla, English, or Banglish.
 Return ONLY valid JSON.
 Do not use severity words like low, medium, high, critical.
-Do not insult or minimize the user's issue.
+Do not minimize the user's issue.
 
 User transcript:
 "${transcript}"
 
-Return only this JSON shape:
+Return this JSON:
 {
   "intent": "string",
   "category": "string",
@@ -486,16 +505,15 @@ Return only this JSON shape:
   "confidence": number
 }
 
-Routing examples:
-- Child kidnapping, child taken away, child missing = Child Kidnapping / Abduction.
-- Fire or smoke = Fire / Rescue Emergency.
+Routing:
+- Fire, smoke, burning, আগুন = Fire / Rescue Emergency.
+- Child kidnapping, child taken away, missing child = Child Kidnapping / Abduction.
 - Accident, injured, ambulance = Medical / Ambulance Emergency.
 - Theft, robbery, attack, danger = Police / Crime Emergency.
-- Women or child abuse / harassment / violence = Women / Child Safety Support.
-- No water or WASA = Water Supply Problem.
-- Electricity or power issue = Electricity Problem.
-- Cyber crime or hacked = Cyber Crime / Online Fraud.
-- Road, drain, garbage, street light = General Citizen Service Request.
+- No water, water supply, WASA = Water Supply Problem.
+- Electricity, power, current issue = Electricity Problem.
+- Cyber crime, hacked, online fraud = Cyber Crime / Online Fraud.
+- If unclear, category must be "Voice Needs Repeat".
 `;
 
   const text = await callGemini([{ text: prompt }]);
@@ -509,23 +527,30 @@ async function analyzeAudioWithGemini(audioBase64, mimeType) {
 You are CivicFlow AI for Bangladesh.
 
 You will receive an audio recording from a citizen.
-The speaker may speak Bangla, English, or Banglish.
+The speaker may speak Bangla, English, Banglish, or regional Bangla.
 
-Your job:
-1. Detect the spoken language.
-2. Transcribe what the user said.
-3. If Bangla, keep a clean Bangla transcript.
-4. Translate the meaning into English.
-5. Create a Banglish/Roman Bangla version if useful.
-6. Create the citizen help route.
+Your most important rule:
+DO NOT GUESS.
+If the speech is unclear, noisy, too short, or could mean two different things, return needsRepeat: true.
+
+Important confusion examples:
+- "fire" must not be confused with "tree".
+- "fire in my area" means Fire / Rescue Emergency.
+- "a tree broke/fell" is NOT fire.
+- If you are not sure whether the speaker said "fire" or "tree", set needsRepeat: true.
+- If you are not sure whether the speaker said "child" or another word, set needsRepeat: true.
+- If audio is unclear, do not create a wrong route.
 
 Return ONLY valid JSON with this exact shape:
 {
-  "detectedLanguage": "Bangla | English | Banglish | Mixed | Unknown",
+  "detectedLanguage": "Bangla | English | Banglish | Mixed | Regional Bangla | Unknown",
   "originalTranscript": "what the user said in the most natural script",
   "banglaTranscript": "Bangla script transcript if available, otherwise empty string",
   "englishTranslation": "English meaning",
   "banglishRoman": "Roman Bangla / Banglish if available, otherwise empty string",
+  "transcriptionConfidence": number,
+  "needsRepeat": boolean,
+  "repeatReason": "short reason if needsRepeat is true, otherwise empty string",
   "report": {
     "intent": "string",
     "category": "string",
@@ -536,16 +561,19 @@ Return ONLY valid JSON with this exact shape:
   }
 }
 
-Rules:
-- Do not use low/medium/high/critical severity words.
-- Do not minimize the user's issue.
-- Child taken away, child kidnapping, child missing = Child Kidnapping / Abduction.
-- Fire or smoke = Fire / Rescue Emergency.
+Routing:
+- Fire, smoke, burning, আগুন = Fire / Rescue Emergency.
+- Child kidnapping, child taken away, child missing = Child Kidnapping / Abduction.
 - Accident, injured, ambulance = Medical / Ambulance Emergency.
 - Theft, robbery, attack, danger = Police / Crime Emergency.
-- No water or WASA = Water Supply Problem.
-- Electricity/power issue = Electricity Problem.
-- Cyber crime, hacked, online fraud = Cyber Crime / Online Fraud.
+- Women or child abuse / harassment / violence = Women / Child Safety Support.
+- No water / water supply / WASA = Water Supply Problem.
+- Electricity / power / current = Electricity Problem.
+- Cyber crime / hacked / online fraud = Cyber Crime / Online Fraud.
+- Tree fell, road blocked, drain, garbage, street light = General Citizen Service Request.
+- If unclear, category must be "Voice Needs Repeat".
+
+Return JSON only.
 `;
 
   const text = await callGemini([
@@ -560,18 +588,53 @@ Rules:
 
   const parsed = safeJsonParse(text);
 
-  const originalTranscript =
+  const originalTranscript = String(
     parsed.originalTranscript ||
-    parsed.banglaTranscript ||
-    parsed.englishTranslation ||
-    parsed.banglishRoman ||
-    "Audio transcript unavailable.";
+      parsed.banglaTranscript ||
+      parsed.englishTranslation ||
+      parsed.banglishRoman ||
+      ""
+  ).trim();
+
+  const confidence =
+    typeof parsed.transcriptionConfidence === "number"
+      ? parsed.transcriptionConfidence
+      : 0.7;
+
+  const needsRepeat =
+    parsed.needsRepeat === true ||
+    confidence < 0.55 ||
+    originalTranscript.length < 4 ||
+    includesAny(normalize(originalTranscript), [
+      "unclear",
+      "inaudible",
+      "unintelligible",
+      "not clear",
+      "can't understand",
+      "cannot understand",
+    ]);
+
+  if (needsRepeat) {
+    const repeatReport = buildRepeatReport(
+      parsed.repeatReason ||
+        "The voice was not clear enough for safe routing. Please repeat the issue clearly."
+    );
+
+    return {
+      detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
+      originalTranscript: originalTranscript || "Audio unclear.",
+      banglaTranscript: String(parsed.banglaTranscript || ""),
+      englishTranslation: String(parsed.englishTranslation || ""),
+      banglishRoman: String(parsed.banglishRoman || ""),
+      report: repeatReport,
+    };
+  }
 
   const repairedReport = repairReport(parsed.report || {}, originalTranscript);
 
   return {
     detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
-    originalTranscript: String(originalTranscript),
+    originalTranscript,
     banglaTranscript: String(parsed.banglaTranscript || ""),
     englishTranslation: String(parsed.englishTranslation || ""),
     banglishRoman: String(parsed.banglishRoman || ""),
@@ -591,7 +654,7 @@ function analyzeWithRules(transcript) {
     category = "Child Kidnapping / Abduction";
   } else if (includesAny(text, ["kidnap", "kidnapped", "missing"])) {
     category = "Kidnapping / Abduction";
-  } else if (includesAny(text, ["fire", "smoke"])) {
+  } else if (includesAny(text, ["fire", "smoke", "burning"])) {
     category = "Fire / Rescue Emergency";
   } else if (includesAny(text, ["ambulance", "accident", "injured", "blood"])) {
     category = "Medical / Ambulance Emergency";
@@ -697,7 +760,7 @@ async function handleAnalyzeAudio(req, res) {
           summary:
             "The backend received the audio, but real AI audio understanding is currently unavailable.",
           recommendedAction:
-            "Use fallback routing, manual review, or try again after AI quota is available.",
+            "Please repeat clearly or try again after AI quota is available.",
           confidence: 0.0,
         },
         "Audio transcript unavailable."
@@ -940,11 +1003,9 @@ function handleDashboard(req, res) {
       --bg: #070b10;
       --side: #0d131b;
       --surface: #111923;
-      --surface2: #151f2b;
       --border: rgba(56, 189, 248, 0.18);
       --primary: #38bdf8;
       --danger: #ff5a5f;
-      --success: #22c55e;
       --text: #f8fafc;
       --muted: #b6c2cf;
       --muted2: #7d8b99;
@@ -958,10 +1019,8 @@ function handleDashboard(req, res) {
       margin: 0;
       min-height: 100vh;
       color: var(--text);
-      font-family: Inter, Arial, Helvetica, sans-serif;
-      background:
-        radial-gradient(circle at top right, rgba(56, 189, 248, 0.10), transparent 30%),
-        var(--bg);
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
     }
 
     .layout {
@@ -1023,15 +1082,25 @@ function handleDashboard(req, res) {
       margin: 22px 0 10px;
     }
 
-    .side-card {
-      padding: 14px;
+    .side-card,
+    .stat,
+    .report-card,
+    .mini-card,
+    .text-block,
+    .empty {
       border-radius: 18px;
       background: rgba(255, 255, 255, 0.035);
       border: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .side-card {
+      padding: 14px;
       margin-bottom: 10px;
     }
 
-    .side-card span {
+    .side-card span,
+    .mini-card span,
+    .text-block span {
       display: block;
       color: var(--muted2);
       font-size: 11px;
@@ -1041,11 +1110,13 @@ function handleDashboard(req, res) {
       margin-bottom: 5px;
     }
 
-    .side-card strong {
+    .side-card strong,
+    .mini-card strong {
       display: block;
       color: var(--text);
-      font-size: 14px;
+      font-size: 13px;
       line-height: 1.4;
+      word-break: break-word;
     }
 
     .side-stats {
@@ -1055,9 +1126,8 @@ function handleDashboard(req, res) {
 
     .stat {
       padding: 16px;
-      border-radius: 20px;
       background: var(--surface);
-      border: 1px solid var(--border);
+      border-color: var(--border);
     }
 
     .stat-number {
@@ -1247,37 +1317,14 @@ function handleDashboard(req, res) {
 
     .mini-card {
       padding: 12px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.035);
-      border: 1px solid rgba(255, 255, 255, 0.06);
       min-width: 0;
-    }
-
-    .mini-card span,
-    .text-block span {
-      display: block;
-      color: var(--muted2);
-      font-size: 11px;
-      font-weight: 1000;
-      text-transform: uppercase;
-      letter-spacing: 0.6px;
-      margin-bottom: 6px;
-    }
-
-    .mini-card strong {
-      display: block;
-      color: var(--text);
-      font-size: 13px;
-      line-height: 1.35;
-      word-break: break-word;
     }
 
     .text-block {
       margin-top: 10px;
       padding: 14px;
-      border-radius: 16px;
       background: rgba(56, 189, 248, 0.075);
-      border: 1px solid rgba(56, 189, 248, 0.14);
+      border-color: rgba(56, 189, 248, 0.14);
     }
 
     .text-block.transcript {
@@ -1307,8 +1354,6 @@ function handleDashboard(req, res) {
 
     .empty {
       padding: 34px;
-      border-radius: 24px;
-      background: rgba(17, 25, 35, 0.96);
       border: 1px dashed rgba(56, 189, 248, 0.28);
       text-align: center;
     }
@@ -1316,15 +1361,6 @@ function handleDashboard(req, res) {
     .empty-icon {
       font-size: 40px;
       margin-bottom: 12px;
-    }
-
-    .empty h2 {
-      margin: 0 0 8px;
-    }
-
-    .empty p {
-      margin: 0;
-      color: var(--muted);
     }
 
     @media (max-width: 1100px) {
