@@ -1,14 +1,18 @@
 {
-  "name": "civicflow-backend",
+  "name": "civicflow-ai-backend",
   "version": "1.0.0",
-  "description": "CivicFlow AI backend API",
+  "description": "CivicFlow AI backend for voice-based civic and emergency help routing.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "author": "Maliha Sanjana",
-  "license": "MIT"
+  "license": "UNLICENSED",
+  "dependencies": {
+    "firebase-admin": "^13.10.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
 }

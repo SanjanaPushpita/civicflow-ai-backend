@@ -1,10 +1,22 @@
 const http = require("http");
+const { initializeApp, cert, getApps } = require("firebase-admin/app");
+const { getFirestore } = require("firebase-admin/firestore");
 
 const PORT = process.env.PORT || 3000;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
-const savedReports = [];
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
+const FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL;
+const FIREBASE_PRIVATE_KEY = process.env.FIREBASE_PRIVATE_KEY;
+
+const REPORT_COLLECTION = "civic_reports";
+const memoryReports = [];
+
+let firestoreDb = null;
+let firebaseStatus = "not-configured";
+let firebaseError = null;
 
 const helplines = {
   nationalEmergency: { number: "999", title: "জাতীয় জরুরি সেবা" },
@@ -25,6 +37,42 @@ const helplines = {
   bangladeshBank: { number: "16267", title: "বাংলাদেশ ব্যাংক" },
   probashiBondhu: { number: "16135", title: "প্রবাস বন্ধু কল সেন্টার" },
 };
+
+function initializeFirebase() {
+  const hasFirebaseConfig =
+    FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY;
+
+  if (!hasFirebaseConfig) {
+    firebaseStatus = "missing-env";
+    firebaseError =
+      "Missing FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, or FIREBASE_PRIVATE_KEY.";
+    return;
+  }
+
+  try {
+    if (getApps().length === 0) {
+      initializeApp({
+        credential: cert({
+          projectId: FIREBASE_PROJECT_ID,
+          clientEmail: FIREBASE_CLIENT_EMAIL,
+          privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+        }),
+      });
+    }
+
+    firestoreDb = getFirestore();
+    firebaseStatus = "connected";
+    firebaseError = null;
+    console.log("Firebase Firestore connected successfully.");
+  } catch (error) {
+    firestoreDb = null;
+    firebaseStatus = "connection-failed";
+    firebaseError = error.message;
+    console.error("Firebase connection failed:", error.message);
+  }
+}
+
+initializeFirebase();
 
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
@@ -704,6 +752,80 @@ async function analyzeTranscript(transcript) {
   }
 }
 
+async function saveReport(savedReport) {
+  memoryReports.unshift(savedReport);
+
+  if (memoryReports.length > 100) {
+    memoryReports.pop();
+  }
+
+  if (!firestoreDb) {
+    return {
+      storage: "memory",
+      firebaseStatus,
+      firebaseError,
+    };
+  }
+
+  const reportForFirestore = {
+    ...savedReport,
+    createdAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+    storageSource: "firebase-firestore",
+  };
+
+  await firestoreDb
+    .collection(REPORT_COLLECTION)
+    .doc(savedReport.id)
+    .set(reportForFirestore);
+
+  return {
+    storage: "firebase-firestore",
+    firebaseStatus,
+    firebaseError: null,
+  };
+}
+
+async function loadReports() {
+  if (!firestoreDb) {
+    return {
+      reports: memoryReports,
+      storage: "memory",
+      firebaseStatus,
+      firebaseError,
+    };
+  }
+
+  try {
+    const snapshot = await firestoreDb
+      .collection(REPORT_COLLECTION)
+      .orderBy("createdAtMs", "desc")
+      .limit(100)
+      .get();
+
+    const reports = snapshot.docs.map((doc) => {
+      return {
+        id: doc.id,
+        ...doc.data(),
+      };
+    });
+
+    return {
+      reports,
+      storage: "firebase-firestore",
+      firebaseStatus,
+      firebaseError: null,
+    };
+  } catch (error) {
+    return {
+      reports: memoryReports,
+      storage: "memory-fallback",
+      firebaseStatus: "read-failed",
+      firebaseError: error.message,
+    };
+  }
+}
+
 async function handleAnalyzeText(req, res) {
   try {
     const body = await readJsonBody(req);
@@ -801,17 +923,14 @@ async function handleSubmitReport(req, res) {
       report: body.report,
     };
 
-    savedReports.unshift(savedReport);
-
-    if (savedReports.length > 100) {
-      savedReports.pop();
-    }
+    const storageResult = await saveReport(savedReport);
 
     sendJson(res, 201, {
       ok: true,
       message: "Report received by CivicFlow AI backend.",
       savedReport,
-      totalReports: savedReports.length,
+      totalReports: memoryReports.length,
+      ...storageResult,
     });
   } catch (error) {
     sendJson(res, 500, {
@@ -821,11 +940,16 @@ async function handleSubmitReport(req, res) {
   }
 }
 
-function handleListReports(req, res) {
+async function handleListReports(req, res) {
+  const result = await loadReports();
+
   sendJson(res, 200, {
     ok: true,
-    totalReports: savedReports.length,
-    reports: savedReports,
+    totalReports: result.reports.length,
+    reports: result.reports,
+    storage: result.storage,
+    firebaseStatus: result.firebaseStatus,
+    firebaseError: result.firebaseError,
   });
 }
 
@@ -871,13 +995,16 @@ function formatDateTime(value) {
   }
 }
 
-function handleDashboard(req, res) {
-  const totalReports = savedReports.length;
-  const emergencyReports = savedReports.filter(
+async function handleDashboard(req, res) {
+  const loadResult = await loadReports();
+  const reports = loadResult.reports;
+
+  const totalReports = reports.length;
+  const emergencyReports = reports.filter(
     (item) => item.report && item.report.isEmergency
   ).length;
   const normalReports = totalReports - emergencyReports;
-  const latestReport = savedReports[0];
+  const latestReport = reports[0];
 
   const latestText = latestReport
     ? `${latestReport.report?.category || "Report"} • ${formatDateTime(
@@ -887,7 +1014,14 @@ function handleDashboard(req, res) {
 
   const backendMode = GEMINI_API_KEY ? "Gemini Ready" : "Fallback Only";
 
-  const reportCards = savedReports
+  const firebaseBox =
+    loadResult.storage === "firebase-firestore"
+      ? `<div class="side-card good"><span>Storage</span><strong>Firebase Firestore connected</strong></div>`
+      : `<div class="side-card bad"><span>Storage</span><strong>${escapeHtml(
+          loadResult.storage
+        )}<br>${escapeHtml(loadResult.firebaseError || "Firebase not connected")}</strong></div>`;
+
+  const reportCards = reports
     .map((item, index) => {
       const report = item.report || {};
       const isEmergency = Boolean(report.isEmergency);
@@ -965,7 +1099,7 @@ function handleDashboard(req, res) {
     .join("");
 
   const emptyState =
-    savedReports.length === 0
+    reports.length === 0
       ? `<div class="empty">
           <h2>No reports received yet</h2>
           <p>Submit a report from the Flutter app. It will appear here after backend submission.</p>
@@ -987,11 +1121,13 @@ function handleDashboard(req, res) {
       --border: rgba(56, 189, 248, 0.18);
       --primary: #38bdf8;
       --danger: #ff5a5f;
+      --success: #22c55e;
       --text: #f8fafc;
       --muted: #b6c2cf;
       --muted2: #7d8b99;
       --soft: rgba(56, 189, 248, 0.10);
       --dangerSoft: rgba(255, 90, 95, 0.13);
+      --successSoft: rgba(34, 197, 94, 0.11);
     }
 
     * { box-sizing: border-box; }
@@ -1077,6 +1213,16 @@ function handleDashboard(req, res) {
     .side-card {
       padding: 14px;
       margin-bottom: 10px;
+    }
+
+    .side-card.good {
+      background: var(--successSoft);
+      border-color: rgba(34, 197, 94, 0.25);
+    }
+
+    .side-card.bad {
+      background: var(--dangerSoft);
+      border-color: rgba(255, 90, 95, 0.25);
     }
 
     .side-card span,
@@ -1349,6 +1495,7 @@ function handleDashboard(req, res) {
       <div class="side-card"><span>Model</span><strong>${escapeHtml(
         GEMINI_MODEL
       )}</strong></div>
+      ${firebaseBox}
       <div class="side-card"><span>Latest Report</span><strong>${escapeHtml(
         latestText
       )}</strong></div>
@@ -1405,19 +1552,24 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/health") {
+    const reportLoad = await loadReports();
+
     sendJson(res, 200, {
       ok: true,
       service: "CivicFlow AI Backend",
       mode: GEMINI_API_KEY ? "gemini-ready" : "missing-gemini-key",
       model: GEMINI_MODEL,
-      savedReports: savedReports.length,
+      firebaseStatus,
+      firebaseError,
+      storage: reportLoad.storage,
+      savedReports: reportLoad.reports.length,
       audioRoute: "/api/civicflow/analyze-audio",
     });
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/dashboard") {
-    handleDashboard(req, res);
+    await handleDashboard(req, res);
     return;
   }
 
@@ -1442,7 +1594,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/api/civicflow/reports") {
-    handleListReports(req, res);
+    await handleListReports(req, res);
     return;
   }
 
