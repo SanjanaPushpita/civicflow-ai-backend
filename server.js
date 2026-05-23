@@ -105,6 +105,7 @@ function repairCommonSpeechMistakes(text) {
 
     .replaceAll("বাচ্চা", " child ")
     .replaceAll("বাচ্চাকে", " child ")
+    .replaceAll("বাচ্চাটাকে", " child ")
     .replaceAll("শিশু", " child ")
     .replaceAll("শিশুকে", " child ")
     .replaceAll("ছেলে", " child ")
@@ -147,6 +148,8 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("আগুন লেগেছে", " fire ")
     .replaceAll("ফায়ার", " fire ")
     .replaceAll("ফায়ার", " fire ")
+    .replaceAll("ফায়ার সার্ভিস", " fire service ")
+    .replaceAll("ফায়ার সার্ভিস", " fire service ")
     .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("জ্বলছে", " burning ")
@@ -417,7 +420,7 @@ function buildRepeatReport(reason) {
         reason ||
         "CivicFlow AI could not clearly understand the voice recording.",
       recommendedAction:
-        "Please ask the user to repeat slowly, closer to the microphone, with less background noise.",
+        "Please ask the user to repeat slowly and clearly near the microphone.",
       confidence: 0.0,
     },
     "Audio unclear"
@@ -487,7 +490,7 @@ async function analyzeWithGemini(transcript) {
   const prompt = `
 You are CivicFlow AI, a Bangladesh civic and emergency help-routing assistant.
 
-Understand the user's report in Bangla, English, or Banglish.
+Understand the user's report in Bangla, English, Banglish, or regional Bangla.
 Return ONLY valid JSON.
 Do not use severity words like low, medium, high, critical.
 Do not minimize the user's issue.
@@ -513,7 +516,8 @@ Routing:
 - No water, water supply, WASA = Water Supply Problem.
 - Electricity, power, current issue = Electricity Problem.
 - Cyber crime, hacked, online fraud = Cyber Crime / Online Fraud.
-- If unclear, category must be "Voice Needs Repeat".
+- Tree fell, road blocked, drain, garbage, street light = General Citizen Service Request.
+- If the transcript is empty or clearly impossible, category = Voice Needs Repeat.
 `;
 
   const text = await callGemini([{ text: prompt }]);
@@ -526,25 +530,27 @@ async function analyzeAudioWithGemini(audioBase64, mimeType) {
   const prompt = `
 You are CivicFlow AI for Bangladesh.
 
-You will receive an audio recording from a citizen.
+You will receive a short citizen voice recording.
 The speaker may speak Bangla, English, Banglish, or regional Bangla.
 
-Your most important rule:
-DO NOT GUESS.
-If the speech is unclear, noisy, too short, or could mean two different things, return needsRepeat: true.
+Main task:
+First transcribe the voice as accurately as possible.
+Then classify the civic/emergency issue.
 
-Important confusion examples:
-- "fire" must not be confused with "tree".
-- "fire in my area" means Fire / Rescue Emergency.
-- "a tree broke/fell" is NOT fire.
-- If you are not sure whether the speaker said "fire" or "tree", set needsRepeat: true.
-- If you are not sure whether the speaker said "child" or another word, set needsRepeat: true.
-- If audio is unclear, do not create a wrong route.
+IMPORTANT:
+- Do NOT become overly cautious.
+- Do NOT mark unclear just because of accent, rural speech, Banglish, or regional Bangla.
+- Only set needsRepeat true if there is silence, no human speech, extremely heavy noise, or the speech is impossible to understand.
+- If you can hear even a few meaningful words, transcribe the best possible meaning and classify from that.
+- If the user says "fire", "আগুন", "agun", "fayar", or "fire in my area", classify as Fire / Rescue Emergency.
+- Do not confuse "fire" with "tree".
+- If the user says "tree", "গাছ", "tree broke", or "fallen tree", classify as General Citizen Service Request, not fire.
+- If you hear both fire and tree, fire takes priority.
 
 Return ONLY valid JSON with this exact shape:
 {
   "detectedLanguage": "Bangla | English | Banglish | Mixed | Regional Bangla | Unknown",
-  "originalTranscript": "what the user said in the most natural script",
+  "originalTranscript": "best exact transcript in the natural script",
   "banglaTranscript": "Bangla script transcript if available, otherwise empty string",
   "englishTranslation": "English meaning",
   "banglishRoman": "Roman Bangla / Banglish if available, otherwise empty string",
@@ -571,7 +577,6 @@ Routing:
 - Electricity / power / current = Electricity Problem.
 - Cyber crime / hacked / online fraud = Cyber Crime / Online Fraud.
 - Tree fell, road blocked, drain, garbage, street light = General Citizen Service Request.
-- If unclear, category must be "Voice Needs Repeat".
 
 Return JSON only.
 `;
@@ -599,25 +604,33 @@ Return JSON only.
   const confidence =
     typeof parsed.transcriptionConfidence === "number"
       ? parsed.transcriptionConfidence
-      : 0.7;
+      : 0.65;
 
-  const needsRepeat =
-    parsed.needsRepeat === true ||
-    confidence < 0.55 ||
-    originalTranscript.length < 4 ||
-    includesAny(normalize(originalTranscript), [
-      "unclear",
+  const transcriptText = normalize(
+    `${originalTranscript} ${parsed.banglaTranscript || ""} ${
+      parsed.englishTranslation || ""
+    } ${parsed.banglishRoman || ""}`
+  );
+
+  const trulyUnclear =
+    originalTranscript.length < 3 ||
+    includesAny(transcriptText, [
+      "silence",
+      "no speech",
+      "no human speech",
       "inaudible",
       "unintelligible",
-      "not clear",
-      "can't understand",
-      "cannot understand",
+      "cannot hear",
+      "can't hear",
+      "impossible to understand",
     ]);
 
-  if (needsRepeat) {
+  const modelAskedRepeat = parsed.needsRepeat === true;
+
+  if (trulyUnclear || (modelAskedRepeat && confidence < 0.35)) {
     const repeatReport = buildRepeatReport(
       parsed.repeatReason ||
-        "The voice was not clear enough for safe routing. Please repeat the issue clearly."
+        "The voice was not clear enough. Please repeat the issue clearly."
     );
 
     return {
@@ -630,7 +643,7 @@ Return JSON only.
     };
   }
 
-  const repairedReport = repairReport(parsed.report || {}, originalTranscript);
+  const repairedReport = repairReport(parsed.report || {}, transcriptText);
 
   return {
     detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
