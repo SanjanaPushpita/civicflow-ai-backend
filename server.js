@@ -801,8 +801,13 @@ function formatDateTime(value) {
     }
 
     return date.toLocaleString("en-GB", {
-      dateStyle: "medium",
-      timeStyle: "short",
+      timeZone: "Asia/Dhaka",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
     });
   } catch (_) {
     return String(value || "Unknown time");
