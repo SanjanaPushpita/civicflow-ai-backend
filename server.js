@@ -2,7 +2,7 @@ const http = require("http");
 
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
 const savedReports = [];
 
@@ -148,8 +148,6 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("আগুন লেগেছে", " fire ")
     .replaceAll("ফায়ার", " fire ")
     .replaceAll("ফায়ার", " fire ")
-    .replaceAll("ফায়ার সার্ভিস", " fire service ")
-    .replaceAll("ফায়ার সার্ভিস", " fire service ")
     .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("জ্বলছে", " burning ")
@@ -213,6 +211,18 @@ function getSafeHelplineRoute(category, transcript) {
   const text = repairCommonSpeechMistakes(`${category} ${transcript}`);
 
   if (
+    includesAny(text, ["fire", "smoke", "burning"]) &&
+    !includesAny(text, ["fallen tree"])
+  ) {
+    return {
+      isEmergency: true,
+      emergencyType: "Fire / Rescue Emergency",
+      helpline: helplines.nationalEmergency,
+      secondaryHelpline: null,
+    };
+  }
+
+  if (
     includesAny(text, ["child"]) &&
     includesAny(text, ["kidnap", "kidnapped", "missing", "abduction"])
   ) {
@@ -228,15 +238,6 @@ function getSafeHelplineRoute(category, transcript) {
     return {
       isEmergency: true,
       emergencyType: "Police / Safety Emergency",
-      helpline: helplines.nationalEmergency,
-      secondaryHelpline: null,
-    };
-  }
-
-  if (includesAny(text, ["fire", "smoke", "burning"])) {
-    return {
-      isEmergency: true,
-      emergencyType: "Fire / Rescue Emergency",
       helpline: helplines.nationalEmergency,
       secondaryHelpline: null,
     };
@@ -418,9 +419,9 @@ function buildRepeatReport(reason) {
       location: "Current user area",
       summary:
         reason ||
-        "CivicFlow AI could not clearly understand the voice recording.",
+        "CivicFlow AI could not hear enough speech from the recording.",
       recommendedAction:
-        "Please ask the user to repeat slowly and clearly near the microphone.",
+        "Please speak again clearly and keep the phone close to the mouth.",
       confidence: 0.0,
     },
     "Audio unclear"
@@ -517,7 +518,6 @@ Routing:
 - Electricity, power, current issue = Electricity Problem.
 - Cyber crime, hacked, online fraud = Cyber Crime / Online Fraud.
 - Tree fell, road blocked, drain, garbage, street light = General Citizen Service Request.
-- If the transcript is empty or clearly impossible, category = Voice Needs Repeat.
 `;
 
   const text = await callGemini([{ text: prompt }]);
@@ -533,30 +533,30 @@ You are CivicFlow AI for Bangladesh.
 You will receive a short citizen voice recording.
 The speaker may speak Bangla, English, Banglish, or regional Bangla.
 
-Main task:
-First transcribe the voice as accurately as possible.
-Then classify the civic/emergency issue.
+Task:
+1. Transcribe the audio as best as possible.
+2. Translate/normalize the meaning.
+3. Create the correct civic/emergency help route.
 
-IMPORTANT:
-- Do NOT become overly cautious.
-- Do NOT mark unclear just because of accent, rural speech, Banglish, or regional Bangla.
-- Only set needsRepeat true if there is silence, no human speech, extremely heavy noise, or the speech is impossible to understand.
-- If you can hear even a few meaningful words, transcribe the best possible meaning and classify from that.
-- If the user says "fire", "আগুন", "agun", "fayar", or "fire in my area", classify as Fire / Rescue Emergency.
-- Do not confuse "fire" with "tree".
-- If the user says "tree", "গাছ", "tree broke", or "fallen tree", classify as General Citizen Service Request, not fire.
-- If you hear both fire and tree, fire takes priority.
+Important:
+- Do NOT say unclear unless there is almost no human voice.
+- Do NOT overthink accents.
+- If you hear some useful words, use them.
+- If the user says fire, আগুন, agun, fayar, or fire in my area, classify as Fire / Rescue Emergency.
+- If the user says tree, গাছ, tree broke, or fallen tree, classify as General Citizen Service Request.
+- If both fire and tree appear, fire takes priority because it is safer.
+- Do not use low/medium/high/critical severity words.
 
-Return ONLY valid JSON with this exact shape:
+Return ONLY valid JSON:
 {
   "detectedLanguage": "Bangla | English | Banglish | Mixed | Regional Bangla | Unknown",
-  "originalTranscript": "best exact transcript in the natural script",
+  "originalTranscript": "best transcript in natural script",
   "banglaTranscript": "Bangla script transcript if available, otherwise empty string",
   "englishTranslation": "English meaning",
   "banglishRoman": "Roman Bangla / Banglish if available, otherwise empty string",
   "transcriptionConfidence": number,
   "needsRepeat": boolean,
-  "repeatReason": "short reason if needsRepeat is true, otherwise empty string",
+  "repeatReason": "only if almost no human voice, otherwise empty string",
   "report": {
     "intent": "string",
     "category": "string",
@@ -577,8 +577,6 @@ Routing:
 - Electricity / power / current = Electricity Problem.
 - Cyber crime / hacked / online fraud = Cyber Crime / Online Fraud.
 - Tree fell, road blocked, drain, garbage, street light = General Citizen Service Request.
-
-Return JSON only.
 `;
 
   const text = await callGemini([
@@ -601,36 +599,29 @@ Return JSON only.
       ""
   ).trim();
 
-  const confidence =
-    typeof parsed.transcriptionConfidence === "number"
-      ? parsed.transcriptionConfidence
-      : 0.65;
-
-  const transcriptText = normalize(
+  const allText = normalize(
     `${originalTranscript} ${parsed.banglaTranscript || ""} ${
       parsed.englishTranslation || ""
-    } ${parsed.banglishRoman || ""}`
+    } ${parsed.banglishRoman || ""} ${
+      parsed.report?.category || ""
+    } ${parsed.report?.summary || ""}`
   );
 
-  const trulyUnclear =
-    originalTranscript.length < 3 ||
-    includesAny(transcriptText, [
-      "silence",
+  const trulyEmpty =
+    originalTranscript.length < 2 ||
+    includesAny(allText, [
+      "no human voice",
       "no speech",
-      "no human speech",
+      "silence",
+      "empty audio",
+      "cannot hear anything",
       "inaudible",
-      "unintelligible",
-      "cannot hear",
-      "can't hear",
-      "impossible to understand",
     ]);
 
-  const modelAskedRepeat = parsed.needsRepeat === true;
-
-  if (trulyUnclear || (modelAskedRepeat && confidence < 0.35)) {
+  if (trulyEmpty) {
     const repeatReport = buildRepeatReport(
       parsed.repeatReason ||
-        "The voice was not clear enough. Please repeat the issue clearly."
+        "The recording did not contain enough clear human voice."
     );
 
     return {
@@ -643,7 +634,7 @@ Return JSON only.
     };
   }
 
-  const repairedReport = repairReport(parsed.report || {}, transcriptText);
+  const repairedReport = repairReport(parsed.report || {}, allText);
 
   return {
     detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
@@ -660,15 +651,15 @@ function analyzeWithRules(transcript) {
 
   let category = "General Citizen Service Request";
 
-  if (
+  if (includesAny(text, ["fire", "smoke", "burning"])) {
+    category = "Fire / Rescue Emergency";
+  } else if (
     includesAny(text, ["child"]) &&
     includesAny(text, ["kidnap", "kidnapped", "missing"])
   ) {
     category = "Child Kidnapping / Abduction";
   } else if (includesAny(text, ["kidnap", "kidnapped", "missing"])) {
     category = "Kidnapping / Abduction";
-  } else if (includesAny(text, ["fire", "smoke", "burning"])) {
-    category = "Fire / Rescue Emergency";
   } else if (includesAny(text, ["ambulance", "accident", "injured", "blood"])) {
     category = "Medical / Ambulance Emergency";
   } else if (includesAny(text, ["police", "theft", "robbery", "attack"])) {
@@ -765,18 +756,8 @@ async function handleAnalyzeAudio(req, res) {
     } catch (error) {
       const cleanMessage = cleanAiErrorMessage(error.message);
 
-      const fallbackReport = repairReport(
-        {
-          intent: "Audio Help Request",
-          category: "Voice Audio Needs Review",
-          location: "Current user area",
-          summary:
-            "The backend received the audio, but real AI audio understanding is currently unavailable.",
-          recommendedAction:
-            "Please repeat clearly or try again after AI quota is available.",
-          confidence: 0.0,
-        },
-        "Audio transcript unavailable."
+      const fallbackReport = buildRepeatReport(
+        "The backend received the audio, but real AI audio understanding is temporarily unavailable."
       );
 
       sendJson(res, 200, {
@@ -936,15 +917,7 @@ function handleDashboard(req, res) {
         : "";
 
       return `
-        <article
-          class="report-card"
-          data-type="${isEmergency ? "emergency" : "normal"}"
-          data-search="${escapeHtml(
-            `${report.category || ""} ${report.summary || ""} ${
-              report.helplineLabel || ""
-            } ${report.helplineNumber || ""} ${item.status || ""}`
-          ).toLowerCase()}"
-        >
+        <article class="report-card" data-type="${isEmergency ? "emergency" : "normal"}">
           <div class="card-head">
             <div>
               <span class="${badgeClass}">${badgeText}</span>
@@ -956,22 +929,18 @@ function handleDashboard(req, res) {
           <h2>${escapeHtml(report.category || "Unknown Issue")}</h2>
 
           <div class="mini-grid">
-            <div class="mini-card">
-              <span>Status</span>
-              <strong>${escapeHtml(item.status || "received")}</strong>
-            </div>
-            <div class="mini-card">
-              <span>Source</span>
-              <strong>${escapeHtml(item.source || "flutter-app")}</strong>
-            </div>
-            <div class="mini-card">
-              <span>Area</span>
-              <strong>${escapeHtml(report.location || "Unknown area")}</strong>
-            </div>
-            <div class="mini-card">
-              <span>Help</span>
-              <strong>${escapeHtml(primaryHelp)}</strong>
-            </div>
+            <div class="mini-card"><span>Status</span><strong>${escapeHtml(
+              item.status || "received"
+            )}</strong></div>
+            <div class="mini-card"><span>Source</span><strong>${escapeHtml(
+              item.source || "flutter-app"
+            )}</strong></div>
+            <div class="mini-card"><span>Area</span><strong>${escapeHtml(
+              report.location || "Unknown area"
+            )}</strong></div>
+            <div class="mini-card"><span>Help</span><strong>${escapeHtml(
+              primaryHelp
+            )}</strong></div>
             ${secondaryHelp}
           </div>
 
@@ -998,7 +967,6 @@ function handleDashboard(req, res) {
   const emptyState =
     savedReports.length === 0
       ? `<div class="empty">
-          <div class="empty-icon">📭</div>
           <h2>No reports received yet</h2>
           <p>Submit a report from the Flutter app. It will appear here after backend submission.</p>
         </div>`
@@ -1177,13 +1145,11 @@ function handleDashboard(req, res) {
     .topbar h2 {
       margin: 0;
       font-size: 28px;
-      letter-spacing: -0.5px;
     }
 
     .topbar p {
       margin: 6px 0 0;
       color: var(--muted);
-      line-height: 1.4;
     }
 
     .actions {
@@ -1195,10 +1161,7 @@ function handleDashboard(req, res) {
 
     .btn {
       display: inline-flex;
-      align-items: center;
       justify-content: center;
-      border: 0;
-      cursor: pointer;
       padding: 12px 16px;
       border-radius: 999px;
       background: var(--primary);
@@ -1215,48 +1178,6 @@ function handleDashboard(req, res) {
       border: 1px solid rgba(255, 255, 255, 0.10);
     }
 
-    .filters {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
-      margin-bottom: 18px;
-    }
-
-    .search {
-      width: 100%;
-      padding: 15px 16px;
-      border-radius: 18px;
-      border: 1px solid rgba(255, 255, 255, 0.10);
-      background: rgba(17, 25, 35, 0.95);
-      color: var(--text);
-      outline: none;
-      font-size: 15px;
-      font-weight: 700;
-    }
-
-    .chips {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-
-    .chip {
-      padding: 13px 15px;
-      border-radius: 999px;
-      border: 1px solid rgba(255, 255, 255, 0.10);
-      background: rgba(17, 25, 35, 0.95);
-      color: var(--muted);
-      cursor: pointer;
-      font-weight: 1000;
-    }
-
-    .chip.active {
-      background: var(--soft);
-      border-color: rgba(56, 189, 248, 0.34);
-      color: var(--primary);
-    }
-
     .reports {
       display: grid;
       gap: 14px;
@@ -1267,10 +1188,6 @@ function handleDashboard(req, res) {
       border-radius: 24px;
       background: rgba(17, 25, 35, 0.96);
       border: 1px solid var(--border);
-    }
-
-    .report-card.hidden {
-      display: none;
     }
 
     .card-head {
@@ -1318,7 +1235,6 @@ function handleDashboard(req, res) {
     .report-card h2 {
       margin: 0 0 12px;
       font-size: 22px;
-      letter-spacing: -0.35px;
     }
 
     .mini-grid {
@@ -1371,11 +1287,6 @@ function handleDashboard(req, res) {
       text-align: center;
     }
 
-    .empty-icon {
-      font-size: 40px;
-      margin-bottom: 12px;
-    }
-
     @media (max-width: 1100px) {
       .layout {
         grid-template-columns: 1fr;
@@ -1400,14 +1311,11 @@ function handleDashboard(req, res) {
         padding: 18px;
       }
 
-      .topbar,
-      .filters {
-        grid-template-columns: 1fr;
+      .topbar {
         display: grid;
       }
 
-      .actions,
-      .chips {
+      .actions {
         justify-content: flex-start;
       }
 
@@ -1432,38 +1340,24 @@ function handleDashboard(req, res) {
     <aside>
       <div class="brand-pill"><span class="dot"></span> Live Backend</div>
       <h1>CivicFlow AI</h1>
-      <p class="sidebar-text">
-        Admin dashboard for citizen reports received from the Flutter app.
-      </p>
+      <p class="sidebar-text">Admin dashboard for citizen reports received from the Flutter app.</p>
 
       <div class="side-section-title">System</div>
-      <div class="side-card">
-        <span>AI Mode</span>
-        <strong>${escapeHtml(backendMode)}</strong>
-      </div>
-      <div class="side-card">
-        <span>Model</span>
-        <strong>${escapeHtml(GEMINI_MODEL)}</strong>
-      </div>
-      <div class="side-card">
-        <span>Latest Report</span>
-        <strong>${escapeHtml(latestText)}</strong>
-      </div>
+      <div class="side-card"><span>AI Mode</span><strong>${escapeHtml(
+        backendMode
+      )}</strong></div>
+      <div class="side-card"><span>Model</span><strong>${escapeHtml(
+        GEMINI_MODEL
+      )}</strong></div>
+      <div class="side-card"><span>Latest Report</span><strong>${escapeHtml(
+        latestText
+      )}</strong></div>
 
       <div class="side-section-title">Report Summary</div>
       <div class="side-stats">
-        <div class="stat">
-          <div class="stat-number">${totalReports}</div>
-          <div class="stat-label">Total Reports</div>
-        </div>
-        <div class="stat danger">
-          <div class="stat-number">${emergencyReports}</div>
-          <div class="stat-label">Emergency Routes</div>
-        </div>
-        <div class="stat">
-          <div class="stat-number">${normalReports}</div>
-          <div class="stat-label">Normal Routes</div>
-        </div>
+        <div class="stat"><div class="stat-number">${totalReports}</div><div class="stat-label">Total Reports</div></div>
+        <div class="stat danger"><div class="stat-number">${emergencyReports}</div><div class="stat-label">Emergency Routes</div></div>
+        <div class="stat"><div class="stat-number">${normalReports}</div><div class="stat-label">Normal Routes</div></div>
       </div>
     </aside>
 
@@ -1471,7 +1365,7 @@ function handleDashboard(req, res) {
       <section class="topbar">
         <div>
           <h2>Submitted Reports</h2>
-          <p>Search, filter, and review citizen help routes clearly.</p>
+          <p>Review citizen help routes clearly.</p>
         </div>
         <div class="actions">
           <a class="btn secondary" href="/api/civicflow/reports" target="_blank">View JSON</a>
@@ -1479,56 +1373,12 @@ function handleDashboard(req, res) {
         </div>
       </section>
 
-      <section class="filters">
-        <input id="searchInput" class="search" type="search" placeholder="Search by issue, helpline, status, summary..." />
-        <div class="chips">
-          <button class="chip active" data-filter="all">All</button>
-          <button class="chip" data-filter="emergency">Emergency</button>
-          <button class="chip" data-filter="normal">Normal</button>
-        </div>
-      </section>
-
-      <section id="reports" class="reports">
+      <section class="reports">
         ${emptyState}
         ${reportCards}
       </section>
     </main>
   </div>
-
-  <script>
-    const searchInput = document.getElementById("searchInput");
-    const chips = document.querySelectorAll(".chip");
-    const cards = document.querySelectorAll(".report-card");
-    let activeFilter = "all";
-
-    function applyFilters() {
-      const query = (searchInput.value || "").toLowerCase().trim();
-
-      cards.forEach((card) => {
-        const type = card.dataset.type;
-        const search = card.dataset.search || "";
-        const matchesFilter = activeFilter === "all" || type === activeFilter;
-        const matchesSearch = !query || search.includes(query);
-
-        if (matchesFilter && matchesSearch) {
-          card.classList.remove("hidden");
-        } else {
-          card.classList.add("hidden");
-        }
-      });
-    }
-
-    searchInput.addEventListener("input", applyFilters);
-
-    chips.forEach((chip) => {
-      chip.addEventListener("click", () => {
-        chips.forEach((item) => item.classList.remove("active"));
-        chip.classList.add("active");
-        activeFilter = chip.dataset.filter;
-        applyFilters();
-      });
-    });
-  </script>
 </body>
 </html>
 `;
