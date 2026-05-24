@@ -19,6 +19,15 @@ const ADMIN_SESSION_SECRET =
 const REPORT_COLLECTION = "civic_reports";
 const ADMIN_COOKIE_NAME = "civicflow_admin_session";
 
+const STATUS_OPTIONS = [
+  "Received",
+  "Under Review",
+  "Contacted",
+  "Emergency Escalated",
+  "Resolved",
+  "Rejected / Invalid",
+];
+
 const memoryReports = [];
 
 let firestoreDb = null;
@@ -859,6 +868,7 @@ async function saveReport(savedReport) {
     ...savedReport,
     createdAtMs: Date.now(),
     updatedAtMs: Date.now(),
+    updatedAt: new Date().toISOString(),
     storageSource: "firebase-firestore",
   };
 
@@ -912,6 +922,60 @@ async function loadReports() {
       firebaseError: error.message,
     };
   }
+}
+
+async function updateReportStatus(reportId, status, adminNote) {
+  const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
+
+  const cleanedReportId = String(reportId || "").trim();
+  const cleanedStatus = String(status || "").trim();
+  const cleanedAdminNote = String(adminNote || "").trim().slice(0, 2000);
+
+  if (!cleanedReportId) {
+    throw new Error("Missing report ID.");
+  }
+
+  if (!STATUS_OPTIONS.includes(cleanedStatus)) {
+    throw new Error("Invalid report status.");
+  }
+
+  const updatePayload = {
+    status: cleanedStatus,
+    adminNote: cleanedAdminNote,
+    updatedAt: nowIso,
+    updatedAtMs: nowMs,
+  };
+
+  const memoryIndex = memoryReports.findIndex(
+    (item) => item.id === cleanedReportId
+  );
+
+  if (memoryIndex !== -1) {
+    memoryReports[memoryIndex] = {
+      ...memoryReports[memoryIndex],
+      ...updatePayload,
+    };
+  }
+
+  if (!firestoreDb) {
+    return {
+      storage: "memory",
+      firebaseStatus,
+      firebaseError,
+    };
+  }
+
+  await firestoreDb
+    .collection(REPORT_COLLECTION)
+    .doc(cleanedReportId)
+    .update(updatePayload);
+
+  return {
+    storage: "firebase-firestore",
+    firebaseStatus,
+    firebaseError: null,
+  };
 }
 
 async function handleAnalyzeText(req, res) {
@@ -1005,9 +1069,11 @@ async function handleSubmitReport(req, res) {
     const savedReport = {
       id: `civicflow_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
       createdAt: new Date().toISOString(),
-      status: String(body.status || "received"),
+      updatedAt: new Date().toISOString(),
+      status: String(body.status || "Received"),
       source: String(body.source || "flutter-app"),
       transcript: body.transcript || null,
+      adminNote: "",
       report: body.report,
     };
 
@@ -1084,6 +1150,23 @@ function formatDateTime(value) {
   } catch (_) {
     return String(value || "Unknown time");
   }
+}
+
+function buildStatusOptions(currentStatus) {
+  const current = String(currentStatus || "Received");
+  const options = STATUS_OPTIONS.includes(current)
+    ? STATUS_OPTIONS
+    : [current, ...STATUS_OPTIONS];
+
+  return options
+    .map((option) => {
+      const selected = option === current ? "selected" : "";
+
+      return `<option value="${escapeHtml(option)}" ${selected}>${escapeHtml(
+        option
+      )}</option>`;
+    })
+    .join("");
 }
 
 function buildDashboardLoginPage(message = "") {
@@ -1215,7 +1298,7 @@ function buildDashboardLoginPage(message = "") {
   <main class="card">
     <div class="pill">Protected Dashboard</div>
     <h1>CivicFlow AI</h1>
-    <p>Enter the admin password to view submitted citizen reports.</p>
+    <p>Enter the admin password to view and manage submitted citizen reports.</p>
 
     ${setupWarning}
     ${errorMessage}
@@ -1269,6 +1352,37 @@ function handleDashboardLogout(req, res) {
   });
 }
 
+async function handleUpdateReportStatus(req, res) {
+  if (!isDashboardAuthorized(req)) {
+    sendHtml(res, buildDashboardLoginPage("Please login first."), 401);
+    return;
+  }
+
+  try {
+    const form = await readFormBody(req);
+
+    const reportId = String(form.get("reportId") || "");
+    const status = String(form.get("status") || "");
+    const adminNote = String(form.get("adminNote") || "");
+
+    await updateReportStatus(reportId, status, adminNote);
+
+    redirect(res, "/dashboard");
+  } catch (error) {
+    sendHtml(
+      res,
+      `<h1 style="font-family:Arial;color:#fff;background:#070b10;padding:30px;">Status update failed</h1>
+       <p style="font-family:Arial;color:#ff8a8e;background:#070b10;padding:0 30px 30px;">${escapeHtml(
+         error.message
+       )}</p>
+       <p style="font-family:Arial;background:#070b10;padding:0 30px 30px;">
+        <a style="color:#38bdf8;" href="/dashboard">Back to dashboard</a>
+       </p>`,
+      500
+    );
+  }
+}
+
 async function handleDashboard(req, res) {
   const loadResult = await loadReports();
   const reports = loadResult.reports;
@@ -1293,7 +1407,9 @@ async function handleDashboard(req, res) {
       ? `<div class="side-card good"><span>Storage</span><strong>Firebase Firestore connected</strong></div>`
       : `<div class="side-card bad"><span>Storage</span><strong>${escapeHtml(
           loadResult.storage
-        )}<br>${escapeHtml(loadResult.firebaseError || "Firebase not connected")}</strong></div>`;
+        )}<br>${escapeHtml(
+          loadResult.firebaseError || "Firebase not connected"
+        )}</strong></div>`;
 
   const reportCards = reports
     .map((item, index) => {
@@ -1311,9 +1427,9 @@ async function handleDashboard(req, res) {
         report.secondaryHelplineLabel && report.secondaryHelplineNumber
           ? `<div class="mini-card">
               <span>Also</span>
-              <strong>${escapeHtml(report.secondaryHelplineLabel)} • ${escapeHtml(
-              report.secondaryHelplineNumber
-            )}</strong>
+              <strong>${escapeHtml(
+                report.secondaryHelplineLabel
+              )} • ${escapeHtml(report.secondaryHelplineNumber)}</strong>
             </div>`
           : "";
 
@@ -1324,21 +1440,32 @@ async function handleDashboard(req, res) {
           </section>`
         : "";
 
+      const adminNoteBlock = item.adminNote
+        ? `<section class="text-block admin-note">
+            <span>Admin Note</span>
+            <p>${escapeHtml(item.adminNote)}</p>
+          </section>`
+        : "";
+
       return `
-        <article class="report-card" data-type="${isEmergency ? "emergency" : "normal"}">
+        <article class="report-card" data-type="${
+          isEmergency ? "emergency" : "normal"
+        }">
           <div class="card-head">
             <div>
               <span class="${badgeClass}">${badgeText}</span>
               <span class="report-number">#${index + 1}</span>
             </div>
-            <span class="time">${escapeHtml(formatDateTime(item.createdAt))}</span>
+            <span class="time">${escapeHtml(
+              formatDateTime(item.createdAt)
+            )}</span>
           </div>
 
           <h2>${escapeHtml(report.category || "Unknown Issue")}</h2>
 
           <div class="mini-grid">
             <div class="mini-card"><span>Status</span><strong>${escapeHtml(
-              item.status || "received"
+              item.status || "Received"
             )}</strong></div>
             <div class="mini-card"><span>Source</span><strong>${escapeHtml(
               item.source || "flutter-app"
@@ -1365,6 +1492,30 @@ async function handleDashboard(req, res) {
               report.recommendedAction || "Review and route manually."
             )}</p>
           </section>
+
+          ${adminNoteBlock}
+
+          <form class="status-form" method="POST" action="/admin/update-report-status">
+            <input type="hidden" name="reportId" value="${escapeHtml(
+              item.id
+            )}" />
+
+            <label>
+              Update Status
+              <select name="status">
+                ${buildStatusOptions(item.status)}
+              </select>
+            </label>
+
+            <label>
+              Admin Note
+              <textarea name="adminNote" rows="3" placeholder="Write admin note or action taken...">${escapeHtml(
+                item.adminNote || ""
+              )}</textarea>
+            </label>
+
+            <button type="submit">Save Status</button>
+          </form>
 
           <p class="id">ID: ${escapeHtml(item.id)}</p>
         </article>
@@ -1692,11 +1843,69 @@ async function handleDashboard(req, res) {
       border-color: rgba(34, 197, 94, 0.16);
     }
 
+    .text-block.admin-note {
+      background: rgba(251, 191, 36, 0.08);
+      border-color: rgba(251, 191, 36, 0.20);
+    }
+
     .text-block p {
       margin: 0;
       color: #dbe4ee;
       line-height: 1.5;
       font-size: 14px;
+    }
+
+    .status-form {
+      margin-top: 14px;
+      padding: 14px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      display: grid;
+      gap: 12px;
+    }
+
+    .status-form label {
+      display: grid;
+      gap: 7px;
+      color: var(--muted2);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      font-weight: 900;
+    }
+
+    .status-form select,
+    .status-form textarea {
+      width: 100%;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      background: #0d131b;
+      color: var(--text);
+      padding: 12px;
+      outline: none;
+      font-size: 14px;
+      font-family: Arial, Helvetica, sans-serif;
+      text-transform: none;
+      letter-spacing: 0;
+      font-weight: 700;
+    }
+
+    .status-form textarea {
+      resize: vertical;
+      line-height: 1.45;
+    }
+
+    .status-form button {
+      justify-self: start;
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      background: var(--primary);
+      color: #061018;
+      font-size: 14px;
+      font-weight: 1000;
+      cursor: pointer;
     }
 
     .id {
@@ -1758,6 +1967,10 @@ async function handleDashboard(req, res) {
       .time {
         text-align: left;
       }
+
+      .status-form button {
+        width: 100%;
+      }
     }
   </style>
 </head>
@@ -1792,7 +2005,7 @@ async function handleDashboard(req, res) {
       <section class="topbar">
         <div>
           <h2>Submitted Reports</h2>
-          <p>Review citizen help routes clearly. Dashboard access is password protected.</p>
+          <p>Review, update, and manage citizen help routes clearly.</p>
         </div>
         <div class="actions">
           <a class="btn secondary" href="/admin/reports-json" target="_blank">View JSON</a>
@@ -1876,6 +2089,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (
+      req.method === "POST" &&
+      url.pathname === "/admin/update-report-status"
+    ) {
+      await handleUpdateReportStatus(req, res);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/test") {
       await handleTest(req, res, url);
       return;
@@ -1903,6 +2124,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/api/civicflow/reports") {
+      if (!isDashboardAuthorized(req)) {
+        sendJson(res, 401, {
+          ok: false,
+          error: "Admin login required.",
+        });
+        return;
+      }
+
       await handleListReports(req, res);
       return;
     }
