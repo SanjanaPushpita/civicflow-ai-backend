@@ -1,4 +1,5 @@
 const http = require("http");
+const crypto = require("crypto");
 const { initializeApp, cert, getApps } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 
@@ -11,7 +12,13 @@ const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
 const FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL;
 const FIREBASE_PRIVATE_KEY = process.env.FIREBASE_PRIVATE_KEY;
 
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+const ADMIN_SESSION_SECRET =
+  process.env.ADMIN_SESSION_SECRET || "civicflow-local-admin-secret";
+
 const REPORT_COLLECTION = "civic_reports";
+const ADMIN_COOKIE_NAME = "civicflow_admin_session";
+
 const memoryReports = [];
 
 let firestoreDb = null;
@@ -85,15 +92,25 @@ function sendJson(res, statusCode, data) {
   res.end(JSON.stringify(data));
 }
 
-function sendHtml(res, html) {
-  res.writeHead(200, {
+function sendHtml(res, html, statusCode = 200, extraHeaders = {}) {
+  res.writeHead(statusCode, {
     "Content-Type": "text/html; charset=utf-8",
+    ...extraHeaders,
   });
 
   res.end(html);
 }
 
-function readJsonBody(req) {
+function redirect(res, location, extraHeaders = {}) {
+  res.writeHead(302, {
+    Location: location,
+    ...extraHeaders,
+  });
+
+  res.end();
+}
+
+function readRawBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
 
@@ -107,15 +124,35 @@ function readJsonBody(req) {
     });
 
     req.on("end", () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch (error) {
-        reject(error);
-      }
+      resolve(body);
     });
 
     req.on("error", reject);
   });
+}
+
+async function readJsonBody(req) {
+  const rawBody = await readRawBody(req);
+
+  try {
+    return rawBody ? JSON.parse(rawBody) : {};
+  } catch (error) {
+    throw new Error("Invalid JSON body.");
+  }
+}
+
+async function readFormBody(req) {
+  const rawBody = await readRawBody(req);
+  return new URLSearchParams(rawBody);
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function normalize(text) {
@@ -131,6 +168,57 @@ function includesAny(text, words) {
     const cleanWord = String(word || "").toLowerCase().trim();
     return cleanWord.length > 0 && text.includes(cleanWord);
   });
+}
+
+function getCookie(req, name) {
+  const cookieHeader = req.headers.cookie || "";
+  const cookies = cookieHeader.split(";").map((item) => item.trim());
+
+  for (const cookie of cookies) {
+    const [key, ...valueParts] = cookie.split("=");
+
+    if (key === name) {
+      return decodeURIComponent(valueParts.join("="));
+    }
+  }
+
+  return "";
+}
+
+function makeAdminSessionToken() {
+  return crypto
+    .createHmac("sha256", ADMIN_SESSION_SECRET)
+    .update(ADMIN_PASSWORD)
+    .digest("hex");
+}
+
+function safeCompare(left, right) {
+  const leftBuffer = Buffer.from(String(left || ""));
+  const rightBuffer = Buffer.from(String(right || ""));
+
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isDashboardAuthorized(req) {
+  if (!ADMIN_PASSWORD) {
+    return false;
+  }
+
+  const cookieToken = getCookie(req, ADMIN_COOKIE_NAME);
+  const expectedToken = makeAdminSessionToken();
+
+  return safeCompare(cookieToken, expectedToken);
+}
+
+function getSecureCookieSuffix(req) {
+  const host = req.headers.host || "";
+  const isLocalhost = host.includes("localhost") || host.includes("127.0.0.1");
+
+  return isLocalhost ? "" : "; Secure";
 }
 
 function repairCommonSpeechMistakes(text) {
@@ -953,6 +1041,18 @@ async function handleListReports(req, res) {
   });
 }
 
+async function handleAdminReportsJson(req, res) {
+  if (!isDashboardAuthorized(req)) {
+    sendJson(res, 401, {
+      ok: false,
+      error: "Admin login required.",
+    });
+    return;
+  }
+
+  await handleListReports(req, res);
+}
+
 async function handleTest(req, res, url) {
   const text = url.searchParams.get("text") || "আমার এলাকায় পানি নেই";
   const result = await analyzeTranscript(text);
@@ -962,15 +1062,6 @@ async function handleTest(req, res, url) {
     input: text,
     ...result,
   });
-}
-
-function escapeHtml(value) {
-  return String(value || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }
 
 function formatDateTime(value) {
@@ -993,6 +1084,189 @@ function formatDateTime(value) {
   } catch (_) {
     return String(value || "Unknown time");
   }
+}
+
+function buildDashboardLoginPage(message = "") {
+  const setupWarning = !ADMIN_PASSWORD
+    ? `<div class="warning">
+        ADMIN_PASSWORD is not set in Render Environment yet. Add it in Render first, then redeploy.
+      </div>`
+    : "";
+
+  const errorMessage = message
+    ? `<div class="error">${escapeHtml(message)}</div>`
+    : "";
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CivicFlow AI Admin Login</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #070b10;
+      color: #f8fafc;
+      font-family: Arial, Helvetica, sans-serif;
+      padding: 20px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 460px;
+      background: #111923;
+      border: 1px solid rgba(56, 189, 248, 0.22);
+      border-radius: 28px;
+      padding: 30px;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+    }
+
+    .pill {
+      display: inline-flex;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.10);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      font-size: 12px;
+      font-weight: 900;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 34px;
+      line-height: 1;
+    }
+
+    p {
+      color: #b6c2cf;
+      line-height: 1.5;
+      margin: 12px 0 22px;
+    }
+
+    label {
+      display: block;
+      color: #b6c2cf;
+      font-size: 13px;
+      font-weight: 900;
+      margin-bottom: 8px;
+    }
+
+    input {
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.11);
+      background: rgba(255, 255, 255, 0.04);
+      color: #f8fafc;
+      border-radius: 16px;
+      padding: 15px 16px;
+      font-size: 16px;
+      outline: none;
+    }
+
+    input:focus {
+      border-color: #38bdf8;
+    }
+
+    button {
+      width: 100%;
+      margin-top: 16px;
+      border: 0;
+      border-radius: 999px;
+      padding: 15px 18px;
+      background: #38bdf8;
+      color: #061018;
+      font-size: 15px;
+      font-weight: 1000;
+      cursor: pointer;
+    }
+
+    .error,
+    .warning {
+      padding: 13px 14px;
+      border-radius: 16px;
+      margin-bottom: 14px;
+      line-height: 1.45;
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .error {
+      color: #ff8a8e;
+      background: rgba(255, 90, 95, 0.13);
+      border: 1px solid rgba(255, 90, 95, 0.24);
+    }
+
+    .warning {
+      color: #fbbf24;
+      background: rgba(251, 191, 36, 0.11);
+      border: 1px solid rgba(251, 191, 36, 0.24);
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="pill">Protected Dashboard</div>
+    <h1>CivicFlow AI</h1>
+    <p>Enter the admin password to view submitted citizen reports.</p>
+
+    ${setupWarning}
+    ${errorMessage}
+
+    <form method="POST" action="/dashboard-login">
+      <label for="password">Admin Password</label>
+      <input id="password" name="password" type="password" placeholder="Enter password" autocomplete="current-password" />
+      <button type="submit">Open Dashboard</button>
+    </form>
+  </main>
+</body>
+</html>
+`;
+}
+
+async function handleDashboardLogin(req, res) {
+  if (!ADMIN_PASSWORD) {
+    sendHtml(
+      res,
+      buildDashboardLoginPage(
+        "ADMIN_PASSWORD is not set in Render Environment yet."
+      ),
+      500
+    );
+    return;
+  }
+
+  const form = await readFormBody(req);
+  const password = String(form.get("password") || "");
+
+  if (!safeCompare(password, ADMIN_PASSWORD)) {
+    sendHtml(res, buildDashboardLoginPage("Wrong password. Try again."), 401);
+    return;
+  }
+
+  const token = makeAdminSessionToken();
+  const secureSuffix = getSecureCookieSuffix(req);
+
+  redirect(res, "/dashboard", {
+    "Set-Cookie": `${ADMIN_COOKIE_NAME}=${encodeURIComponent(
+      token
+    )}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400${secureSuffix}`,
+  });
+}
+
+function handleDashboardLogout(req, res) {
+  const secureSuffix = getSecureCookieSuffix(req);
+
+  redirect(res, "/dashboard", {
+    "Set-Cookie": `${ADMIN_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secureSuffix}`,
+  });
 }
 
 async function handleDashboard(req, res) {
@@ -1324,6 +1598,12 @@ async function handleDashboard(req, res) {
       border: 1px solid rgba(255, 255, 255, 0.10);
     }
 
+    .btn.danger {
+      color: #ffffff;
+      background: rgba(255, 90, 95, 0.16);
+      border: 1px solid rgba(255, 90, 95, 0.28);
+    }
+
     .reports {
       display: grid;
       gap: 14px;
@@ -1484,7 +1764,7 @@ async function handleDashboard(req, res) {
 <body>
   <div class="layout">
     <aside>
-      <div class="brand-pill"><span class="dot"></span> Live Backend</div>
+      <div class="brand-pill"><span class="dot"></span> Protected Backend</div>
       <h1>CivicFlow AI</h1>
       <p class="sidebar-text">Admin dashboard for citizen reports received from the Flutter app.</p>
 
@@ -1512,11 +1792,12 @@ async function handleDashboard(req, res) {
       <section class="topbar">
         <div>
           <h2>Submitted Reports</h2>
-          <p>Review citizen help routes clearly.</p>
+          <p>Review citizen help routes clearly. Dashboard access is password protected.</p>
         </div>
         <div class="actions">
-          <a class="btn secondary" href="/api/civicflow/reports" target="_blank">View JSON</a>
+          <a class="btn secondary" href="/admin/reports-json" target="_blank">View JSON</a>
           <a class="btn" href="/dashboard">Refresh</a>
+          <a class="btn danger" href="/dashboard-logout">Logout</a>
         </div>
       </section>
 
@@ -1536,72 +1817,106 @@ async function handleDashboard(req, res) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  if (req.method === "OPTIONS") {
-    sendJson(res, 200, { ok: true });
-    return;
-  }
+  try {
+    if (req.method === "OPTIONS") {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
 
-  if (req.method === "GET" && url.pathname === "/") {
-    sendJson(res, 200, {
-      ok: true,
-      service: "CivicFlow AI Backend",
-      message:
-        "Use /health, /dashboard, /test?text=your_problem_here, /api/civicflow/analyze-audio, or /api/civicflow/reports",
+    if (req.method === "GET" && url.pathname === "/") {
+      sendJson(res, 200, {
+        ok: true,
+        service: "CivicFlow AI Backend",
+        message:
+          "Use /health, /dashboard, /test?text=your_problem_here, /api/civicflow/analyze-audio, or /api/civicflow/reports",
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/health") {
+      const reportLoad = await loadReports();
+
+      sendJson(res, 200, {
+        ok: true,
+        service: "CivicFlow AI Backend",
+        mode: GEMINI_API_KEY ? "gemini-ready" : "missing-gemini-key",
+        model: GEMINI_MODEL,
+        firebaseStatus,
+        firebaseError,
+        storage: reportLoad.storage,
+        savedReports: reportLoad.reports.length,
+        dashboardProtected: Boolean(ADMIN_PASSWORD),
+        audioRoute: "/api/civicflow/analyze-audio",
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/dashboard") {
+      if (!isDashboardAuthorized(req)) {
+        sendHtml(res, buildDashboardLoginPage());
+        return;
+      }
+
+      await handleDashboard(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/dashboard-login") {
+      await handleDashboardLogin(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/dashboard-logout") {
+      handleDashboardLogout(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/admin/reports-json") {
+      await handleAdminReportsJson(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/test") {
+      await handleTest(req, res, url);
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      url.pathname === "/api/civicflow/analyze-text"
+    ) {
+      await handleAnalyzeText(req, res);
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      url.pathname === "/api/civicflow/analyze-audio"
+    ) {
+      await handleAnalyzeAudio(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/civicflow/reports") {
+      await handleSubmitReport(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/civicflow/reports") {
+      await handleListReports(req, res);
+      return;
+    }
+
+    sendJson(res, 404, {
+      ok: false,
+      error: "Not found",
     });
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/health") {
-    const reportLoad = await loadReports();
-
-    sendJson(res, 200, {
-      ok: true,
-      service: "CivicFlow AI Backend",
-      mode: GEMINI_API_KEY ? "gemini-ready" : "missing-gemini-key",
-      model: GEMINI_MODEL,
-      firebaseStatus,
-      firebaseError,
-      storage: reportLoad.storage,
-      savedReports: reportLoad.reports.length,
-      audioRoute: "/api/civicflow/analyze-audio",
+  } catch (error) {
+    sendJson(res, 500, {
+      ok: false,
+      error: error.message,
     });
-    return;
   }
-
-  if (req.method === "GET" && url.pathname === "/dashboard") {
-    await handleDashboard(req, res);
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/test") {
-    await handleTest(req, res, url);
-    return;
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/civicflow/analyze-text") {
-    await handleAnalyzeText(req, res);
-    return;
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/civicflow/analyze-audio") {
-    await handleAnalyzeAudio(req, res);
-    return;
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/civicflow/reports") {
-    await handleSubmitReport(req, res);
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/api/civicflow/reports") {
-    await handleListReports(req, res);
-    return;
-  }
-
-  sendJson(res, 404, {
-    ok: false,
-    error: "Not found",
-  });
 });
 
 server.listen(PORT, () => {
