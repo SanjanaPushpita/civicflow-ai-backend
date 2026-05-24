@@ -553,6 +553,11 @@ function repairReport(report, transcript) {
     secondaryHelplineLabel: route.secondaryHelpline
       ? route.secondaryHelpline.title
       : null,
+    gpsLatitude: report.gpsLatitude ?? null,
+    gpsLongitude: report.gpsLongitude ?? null,
+    gpsAccuracyMeters: report.gpsAccuracyMeters ?? null,
+    gpsCapturedAtIso: report.gpsCapturedAtIso ?? null,
+    mapsUrl: report.mapsUrl ?? null,
   };
 }
 
@@ -849,6 +854,31 @@ async function analyzeTranscript(transcript) {
   }
 }
 
+function mergeLocationIntoReport(report, locationData) {
+  if (!locationData || typeof locationData !== "object") {
+    return report;
+  }
+
+  const latitude = Number(locationData.latitude);
+  const longitude = Number(locationData.longitude);
+  const accuracyMeters = Number(locationData.accuracyMeters);
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return report;
+  }
+
+  return {
+    ...report,
+    gpsLatitude: latitude,
+    gpsLongitude: longitude,
+    gpsAccuracyMeters: Number.isFinite(accuracyMeters) ? accuracyMeters : null,
+    gpsCapturedAtIso: locationData.capturedAtIso || new Date().toISOString(),
+    mapsUrl:
+      locationData.mapsUrl ||
+      `https://www.google.com/maps?q=${latitude},${longitude}`,
+  };
+}
+
 async function saveReport(savedReport) {
   memoryReports.unshift(savedReport);
 
@@ -1066,6 +1096,11 @@ async function handleSubmitReport(req, res) {
       return;
     }
 
+    const reportWithLocation = mergeLocationIntoReport(
+      body.report,
+      body.locationData
+    );
+
     const savedReport = {
       id: `civicflow_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
       createdAt: new Date().toISOString(),
@@ -1074,7 +1109,8 @@ async function handleSubmitReport(req, res) {
       source: String(body.source || "flutter-app"),
       transcript: body.transcript || null,
       adminNote: "",
-      report: body.report,
+      locationData: body.locationData || null,
+      report: reportWithLocation,
     };
 
     const storageResult = await saveReport(savedReport);
@@ -1433,6 +1469,49 @@ async function handleDashboard(req, res) {
             </div>`
           : "";
 
+      const gpsLatitude = report.gpsLatitude;
+      const gpsLongitude = report.gpsLongitude;
+      const hasGps =
+        gpsLatitude !== null &&
+        gpsLatitude !== undefined &&
+        gpsLongitude !== null &&
+        gpsLongitude !== undefined;
+
+      const gpsMapsUrl =
+        report.mapsUrl ||
+        (hasGps
+          ? `https://www.google.com/maps?q=${gpsLatitude},${gpsLongitude}`
+          : "");
+
+      const gpsBlock = hasGps
+        ? `<section class="text-block gps-block">
+            <span>GPS Location</span>
+            <p>
+              Latitude: ${escapeHtml(gpsLatitude)}<br>
+              Longitude: ${escapeHtml(gpsLongitude)}<br>
+              ${
+                report.gpsAccuracyMeters
+                  ? `Accuracy: about ${escapeHtml(
+                      Math.round(Number(report.gpsAccuracyMeters))
+                    )} meters<br>`
+                  : ""
+              }
+              ${
+                report.gpsCapturedAtIso
+                  ? `Captured: ${escapeHtml(
+                      formatDateTime(report.gpsCapturedAtIso)
+                    )}<br>`
+                  : ""
+              }
+              <a class="map-link" href="${escapeHtml(
+                gpsMapsUrl
+              )}" target="_blank" rel="noopener noreferrer">
+                Open in Google Maps
+              </a>
+            </p>
+          </section>`
+        : "";
+
       const transcriptBlock = item.transcript
         ? `<section class="text-block transcript">
             <span>Transcript</span>
@@ -1478,6 +1557,8 @@ async function handleDashboard(req, res) {
             )}</strong></div>
             ${secondaryHelp}
           </div>
+
+          ${gpsBlock}
 
           ${transcriptBlock}
 
@@ -1848,11 +1929,33 @@ async function handleDashboard(req, res) {
       border-color: rgba(251, 191, 36, 0.20);
     }
 
+    .text-block.gps-block {
+      background: rgba(59, 130, 246, 0.08);
+      border-color: rgba(59, 130, 246, 0.18);
+    }
+
     .text-block p {
       margin: 0;
       color: #dbe4ee;
       line-height: 1.5;
       font-size: 14px;
+    }
+
+    .map-link {
+      display: inline-flex;
+      margin-top: 10px;
+      padding: 10px 13px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.16);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      color: #38bdf8;
+      text-decoration: none;
+      font-weight: 1000;
+      font-size: 13px;
+    }
+
+    .map-link:hover {
+      background: rgba(56, 189, 248, 0.24);
     }
 
     .status-form {
