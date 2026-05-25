@@ -311,57 +311,58 @@ function cleanAiErrorMessage(message) {
 }
 
 async function callGemini(parts, responseMimeType = "application/json") {
-  if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY environment variable.");
-
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts }],
-      generationConfig: {
-  responseMimeType,
-},
-    }),
-  });
-
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error?.message || "Gemini API request failed.");
-
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || data.candidates?.[0]?.content?.parts?.map((part) => part.text).join("") || "";
-}
-
-async function analyzeWithGemini(transcript) {
-  const prompt = `You are CivicFlow AI, a Bangladesh civic and emergency help-routing assistant. Understand Bangla, English, Banglish, or regional Bangla. Return ONLY valid JSON with intent, category, location, summary, recommendedAction, confidence. Do not use severity words. User transcript: "${transcript}". Routing: fire/আগুন=Fire / Rescue Emergency; kidnap/অপহরণ/missing child=Kidnapping / Abduction Emergency; ambulance/accident=Medical / Ambulance Emergency; danger/বিপদ/attack/robbery/police=Police / Safety Emergency; women harassment/violence=Women / Child Safety Emergency; disaster/flood/cyclone=Disaster Emergency; water/WASA=Water Supply Problem; electricity=Electricity Problem; cyber/hack=Cyber Crime / Online Fraud; tree/drain/garbage=General Citizen Service Request.`;
-  return repairReport(safeJsonParse(await callGemini([{ text: prompt }])), transcript);
-}
-
-async function analyzeAudioWithGemini(audioBase64, mimeType) {
-  const prompt = "You are CivicFlow AI for Bangladesh. Transcribe short audio in Bangla, English, Banglish, or regional Bangla. Return ONLY JSON: detectedLanguage, originalTranscript, banglaTranscript, englishTranslation, banglishRoman, transcriptionConfidence, needsRepeat, repeatReason, report{intent,category,location,summary,recommendedAction,confidence}. Do not say unclear unless almost no human voice. Emergency/bipod/help/fire/ambulance/kidnap/harassment/disaster must be routed as emergency.";
-  const parsed = safeJsonParse(await callGemini([{ text: prompt }, { inlineData: { mimeType, data: audioBase64 } }]));
-  const original = String(parsed.originalTranscript || parsed.banglaTranscript || parsed.englishTranslation || parsed.banglishRoman || "").trim();
-  const allText = normalize(`${original} ${parsed.banglaTranscript || ""} ${parsed.englishTranslation || ""} ${parsed.banglishRoman || ""} ${parsed.report?.category || ""} ${parsed.report?.summary || ""}`);
-  const empty = original.length < 2 || includesAny(allText, ["no human voice", "no speech", "silence", "empty audio", "cannot hear anything", "inaudible"]);
-
-  if (empty) {
-    return {
-      detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
-      originalTranscript: original || "Audio unclear.",
-      banglaTranscript: String(parsed.banglaTranscript || ""),
-      englishTranslation: String(parsed.englishTranslation || ""),
-      banglishRoman: String(parsed.banglishRoman || ""),
-      report: buildRepeatReport(parsed.repeatReason || "The recording did not contain enough clear human voice."),
-    };
+  if (!GEMINI_API_KEY) {
+    throw new Error("Missing GEMINI_API_KEY environment variable.");
   }
 
-  return {
-    detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
-    originalTranscript: original,
-    banglaTranscript: String(parsed.banglaTranscript || ""),
-    englishTranslation: String(parsed.englishTranslation || ""),
-    banglishRoman: String(parsed.banglishRoman || ""),
-    report: repairReport(parsed.report || {}, allText),
-  };
+  const timeoutRaw = Number(process.env.GEMINI_TIMEOUT_MS || 25000);
+  const timeoutMs = Number.isFinite(timeoutRaw)
+    ? Math.min(Math.max(timeoutRaw, 5000), 60000)
+    : 25000;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts }],
+        generationConfig: {
+          responseMimeType,
+        },
+      }),
+    });
+
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (_) {
+      data = {};
+    }
+
+    if (!response.ok) {
+      throw new Error(data.error?.message || "Gemini API request failed.");
+    }
+
+    return (
+      data.candidates?.[0]?.content?.parts?.[0]?.text ||
+      data.candidates?.[0]?.content?.parts?.map((part) => part.text).join("") ||
+      ""
+    );
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Gemini API request timed out after ${timeoutMs} ms.`);
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function analyzeWithRules(transcript) {
@@ -914,32 +915,116 @@ function buildLiveSessionCard(s) {
 async function routeRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const path = url.pathname;
-  if (req.method === "OPTIONS") return sendJson(res, 200, { ok: true });
+
+  if (req.method === "OPTIONS") {
+    return sendJson(res, 200, { ok: true });
+  }
+
+  const trailingSlashRedirects = {
+    "/dashboard/": "/dashboard",
+    "/dashboard/reports/": "/dashboard/reports",
+    "/dashboard/live/": "/dashboard/live",
+    "/dashboard-login/": "/dashboard-login",
+  };
+
+  if (req.method === "GET" && trailingSlashRedirects[path]) {
+    return redirect(res, trailingSlashRedirects[path]);
+  }
 
   try {
-    if (req.method === "GET" && ["/", "/health", "/api/health"].includes(path)) return sendJson(res, 200, { ok: true, service: "CivicFlow AI Backend", aiMode: GEMINI_API_KEY ? "gemini-ready" : "fallback-only", model: GEMINI_MODEL, firebaseStatus, firebaseError, time: new Date().toISOString() });
-    if (req.method === "POST" && path === "/api/civicflow/analyze-text") return await handleAnalyzeText(req, res);
-    if (req.method === "POST" && path === "/api/civicflow/analyze-audio") return await handleAnalyzeAudio(req, res);
-    if (req.method === "POST" && ["/api/civicflow/reports", "/api/reports"].includes(path)) return await handleSubmitReport(req, res);
-    if (req.method === "GET" && ["/api/civicflow/reports", "/api/reports"].includes(path)) return await handleListReports(req, res);
-    if (req.method === "GET" && path === "/api/civicflow/admin/reports-json") return await handleAdminReportsJson(req, res);
-    if (req.method === "POST" && path === "/api/civicflow/live-location/start") return await handleLiveTrackingStart(req, res);
-    if (req.method === "POST" && path === "/api/civicflow/live-location/update") return await handleLiveTrackingUpdate(req, res);
-    if (req.method === "POST" && path === "/api/civicflow/live-location/stop") return await handleLiveTrackingStop(req, res);
-    if (req.method === "GET" && path === "/api/civicflow/live-location/sessions") return await handleLiveTrackingList(req, res);
-    if (req.method === "GET" && path === "/api/civicflow/test") return await handleTest(req, res, url);
-    if (req.method === "GET" && path === "/dashboard-login") return sendHtml(res, buildDashboardLoginPage());
-    if (req.method === "POST" && path === "/dashboard-login") return await handleDashboardLogin(req, res);
-    if (req.method === "POST" && path === "/dashboard-logout") return handleDashboardLogout(req, res);
-    if (req.method === "POST" && path === "/dashboard/update-status") return await handleUpdateReportStatus(req, res);
-    if (req.method === "GET" && path === "/dashboard") return await handleReportsDashboard(req, res);
-    if (req.method === "GET" && path === "/dashboard/reports") return await handleReportsDashboard(req, res);
-    if (req.method === "GET" && path === "/dashboard/live") return await handleLiveDashboard(req, res);
+    if (req.method === "GET" && ["/", "/health", "/api/health"].includes(path)) {
+      return sendJson(res, 200, {
+        ok: true,
+        service: "CivicFlow AI Backend",
+        aiMode: GEMINI_API_KEY ? "gemini-ready" : "fallback-only",
+        model: GEMINI_MODEL,
+        firebaseStatus,
+        firebaseError,
+        time: new Date().toISOString(),
+      });
+    }
+
+    if (req.method === "POST" && path === "/api/civicflow/analyze-text") {
+      return await handleAnalyzeText(req, res);
+    }
+
+    if (req.method === "POST" && path === "/api/civicflow/analyze-audio") {
+      return await handleAnalyzeAudio(req, res);
+    }
+
+    if (
+      req.method === "POST" &&
+      ["/api/civicflow/reports", "/api/reports"].includes(path)
+    ) {
+      return await handleSubmitReport(req, res);
+    }
+
+    if (
+      req.method === "GET" &&
+      ["/api/civicflow/reports", "/api/reports"].includes(path)
+    ) {
+      return await handleListReports(req, res);
+    }
+
+    if (req.method === "GET" && path === "/api/civicflow/admin/reports-json") {
+      return await handleAdminReportsJson(req, res);
+    }
+
+    if (req.method === "POST" && path === "/api/civicflow/live-location/start") {
+      return await handleLiveTrackingStart(req, res);
+    }
+
+    if (req.method === "POST" && path === "/api/civicflow/live-location/update") {
+      return await handleLiveTrackingUpdate(req, res);
+    }
+
+    if (req.method === "POST" && path === "/api/civicflow/live-location/stop") {
+      return await handleLiveTrackingStop(req, res);
+    }
+
+    if (req.method === "GET" && path === "/api/civicflow/live-location/sessions") {
+      return await handleLiveTrackingList(req, res);
+    }
+
+    if (req.method === "GET" && path === "/api/civicflow/test") {
+      return await handleTest(req, res, url);
+    }
+
+    if (req.method === "GET" && path === "/dashboard-login") {
+      return sendHtml(res, buildDashboardLoginPage());
+    }
+
+    if (req.method === "POST" && path === "/dashboard-login") {
+      return await handleDashboardLogin(req, res);
+    }
+
+    if (req.method === "POST" && path === "/dashboard-logout") {
+      return handleDashboardLogout(req, res);
+    }
+
+    if (req.method === "POST" && path === "/dashboard/update-status") {
+      return await handleUpdateReportStatus(req, res);
+    }
+
+    if (req.method === "GET" && path === "/dashboard") {
+      return await handleReportsDashboard(req, res);
+    }
+
+    if (req.method === "GET" && path === "/dashboard/reports") {
+      return await handleReportsDashboard(req, res);
+    }
+
+    if (req.method === "GET" && path === "/dashboard/live") {
+      return await handleLiveDashboard(req, res);
+    }
 
     sendJson(res, 404, { ok: false, error: "Route not found.", path });
   } catch (error) {
     console.error("Unhandled request error:", error);
-    sendJson(res, 500, { ok: false, error: error.message || "Internal server error." });
+    sendJson(res, 500, {
+      ok: false,
+      error: error.message || "Internal server error.",
+    });
   }
 }
 
