@@ -365,6 +365,61 @@ async function callGemini(parts, responseMimeType = "application/json") {
     clearTimeout(timer);
   }
 }
+async function analyzeWithGemini(transcript) {
+  const prompt = `You are CivicFlow AI, an emergency voice assistant in Bangladesh. 
+Based on this transcript: "${transcript}"
+Determine if it's an emergency. Extract the category, summary, and action.
+Respond ONLY with a valid JSON matching this exact structure:
+{
+  "intent": "Help Request",
+  "category": "Fire / Rescue Emergency", // Choose appropriate category
+  "location": "Current user area",
+  "summary": "Short summary of the transcript",
+  "recommendedAction": "What to do next",
+  "confidence": 0.95
+}`;
+
+  // Call Gemini API asking for JSON response
+  const responseText = await callGemini([{ text: prompt }], "application/json");
+  const parsedData = safeJsonParse(responseText);
+  
+  // Format the output correctly using your existing repairReport function
+  return repairReport(parsedData, transcript);
+}
+
+async function analyzeAudioWithGemini(audioBase64, mimeType) {
+  const prompt = `You are CivicFlow AI. Transcribe this audio to text and generate an emergency report.
+Respond ONLY with a valid JSON matching this exact structure:
+{
+  "detectedLanguage": "Bengali",
+  "originalTranscript": "bangla text here",
+  "banglaTranscript": "bangla text here",
+  "englishTranslation": "english text here",
+  "banglishRoman": "banglish text here",
+  "report": {
+    "intent": "Help Request",
+    "category": "Appropriate emergency category",
+    "location": "Current user area",
+    "summary": "Short summary",
+    "recommendedAction": "Action to take",
+    "confidence": 0.95
+  }
+}`;
+
+  const parts = [
+    { text: prompt },
+    { inlineData: { mimeType: mimeType, data: audioBase64 } }
+  ];
+
+  const responseText = await callGemini(parts, "application/json");
+  const parsedData = safeJsonParse(responseText);
+  
+  // Ensure the nested report object runs through your safety repair function
+  if (parsedData.report) {
+    parsedData.report = repairReport(parsedData.report, parsedData.banglaTranscript || "");
+  }
+  return parsedData;
+}
 
 function analyzeWithRules(transcript) {
   const text = repairCommonSpeechMistakes(transcript);
