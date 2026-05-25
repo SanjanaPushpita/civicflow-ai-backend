@@ -1,20 +1,50 @@
+// const http = require("http");
+// const crypto = require("crypto");
+// const { initializeApp, cert, getApps } = require("firebase-admin/app");
+// const { getFirestore } = require("firebase-admin/firestore");
+
+// const PORT = process.env.PORT || 3000;
+// const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+// const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
+// const FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL;
+// const FIREBASE_PRIVATE_KEY = process.env.FIREBASE_PRIVATE_KEY;
+// const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
+// const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || "civicflow-local-admin-secret";
 const http = require("http");
 const crypto = require("crypto");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const ffmpegInstaller = require("@ffmpeg-installer/ffmpeg");
 const { initializeApp, cert, getApps } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
+
+const execFileAsync = promisify(execFile);
 
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+const GEMINI_TIMEOUT_MS = clampNumber(process.env.GEMINI_TIMEOUT_MS, 5000, 60000, 12000);
+
+const AZURE_SPEECH_ENABLED = String(process.env.AZURE_SPEECH_ENABLED || "false").toLowerCase() === "true";
+const AZURE_SPEECH_KEY = process.env.AZURE_SPEECH_KEY || "";
+const AZURE_SPEECH_REGION = normalizeAzureRegion(process.env.AZURE_SPEECH_REGION || "");
+const AZURE_SPEECH_LANGUAGE = process.env.AZURE_SPEECH_LANGUAGE || "bn-BD";
+const AZURE_SPEECH_TIMEOUT_MS = clampNumber(process.env.AZURE_SPEECH_TIMEOUT_MS, 5000, 60000, 15000);
+
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
 const FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL;
 const FIREBASE_PRIVATE_KEY = process.env.FIREBASE_PRIVATE_KEY;
+
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || "civicflow-local-admin-secret";
+const ADMIN_COOKIE_NAME = "civicflow_admin_session";
 
 const REPORT_COLLECTION = "civic_reports";
 const LIVE_SESSION_COLLECTION = "live_location_sessions";
-const ADMIN_COOKIE_NAME = "civicflow_admin_session";
 const STATUS_OPTIONS = ["Received", "Under Review", "Contacted", "Emergency Escalated", "Resolved", "Rejected / Invalid"];
 
 const memoryReports = [];
@@ -32,11 +62,25 @@ const helplines = {
   disasterWarning: { number: "1090", title: "দুর্যোগের আগাম বার্তা" },
   cyberCrime: { number: "16444", title: "সাইবার ক্রাইম হেল্পলাইন" },
   dhakaWasa: { number: "16124", title: "ঢাকা ওয়াসা হেল্পলাইন" },
-  dpdc: { number: "16116", title: "ঢাকা ডিপিডিসি হেল্পলাইন" },
+  dpdc: { number: "16116", title: "ডিপিডিসি বিদ্যুৎ হেল্পলাইন" },
+  electionCommission: { number: "132", title: "নির্বাচন কমিশন হেল্পলাইন" },
+  rab: { number: "101", title: "র‍্যাব হেল্পলাইন" },
   nid: { number: "105", title: "জাতীয় পরিচয়পত্র সেবা" },
   railway: { number: "131", title: "বাংলাদেশ রেলওয়ে কল সেন্টার" },
   bangladeshBank: { number: "16267", title: "বাংলাদেশ ব্যাংক" },
 };
+
+initializeFirebase();
+
+function clampNumber(value, min, max, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function normalizeAzureRegion(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, "");
+}
 
 function initializeFirebase() {
   if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY) {
@@ -67,7 +111,6 @@ function initializeFirebase() {
     console.error("Firebase connection failed:", error.message);
   }
 }
-initializeFirebase();
 
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
@@ -94,7 +137,7 @@ function readRawBody(req) {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk.toString();
-      if (body.length > 20_000_000) {
+      if (body.length > 25_000_000) {
         req.destroy();
         reject(new Error("Request body too large"));
       }
@@ -135,7 +178,11 @@ function normalize(text) {
 }
 
 function includesAny(text, words) {
-  return words.some((word) => text.includes(String(word || "").toLowerCase().trim()));
+  const clean = normalize(text);
+  return words.some((word) => {
+    const cleanWord = normalize(word);
+    return cleanWord.length > 0 && clean.includes(cleanWord);
+  });
 }
 
 function makeId(prefix) {
@@ -172,31 +219,28 @@ function getSecureCookieSuffix(req) {
 
 function repairCommonSpeechMistakes(text) {
   return normalize(text)
-    .replaceAll("এলাকা", " area ")
-    .replaceAll("এলাকায়", " area ")
-    .replaceAll("এলাকায়", " area ")
     .replaceAll("জরুরি", " emergency ")
     .replaceAll("ইমার্জেন্সি", " emergency ")
     .replaceAll("সাহায্য", " help ")
     .replaceAll("বাঁচাও", " save me ")
     .replaceAll("বিপদ", " danger ")
-    .replaceAll("হুমকি", " threat ")
     .replaceAll("পুলিশ", " police ")
     .replaceAll("আগুন", " fire ")
     .replaceAll("ফায়ার", " fire ")
+    .replaceAll("ফায়ার", " fire ")
     .replaceAll("ধোঁয়া", " smoke ")
+    .replaceAll("ধোঁয়া", " smoke ")
     .replaceAll("অ্যাম্বুলেন্স", " ambulance ")
     .replaceAll("এম্বুলেন্স", " ambulance ")
     .replaceAll("দুর্ঘটনা", " accident ")
     .replaceAll("আহত", " injured ")
-    .replaceAll("রক্ত", " blood ")
     .replaceAll("অপহরণ", " kidnap ")
     .replaceAll("কিডন্যাপ", " kidnap ")
     .replaceAll("নিখোঁজ", " missing ")
-    .replaceAll("হারিয়ে গেছে", " missing ")
-    .replaceAll("নারী", " woman ")
-    .replaceAll("মহিলা", " woman ")
+    .replaceAll("নারী", " women ")
+    .replaceAll("মহিলা", " women ")
     .replaceAll("হয়রানি", " harassment ")
+    .replaceAll("হয়রানি", " harassment ")
     .replaceAll("নির্যাতন", " abuse ")
     .replaceAll("সহিংসতা", " violence ")
     .replaceAll("শিশু", " child ")
@@ -207,13 +251,23 @@ function repairCommonSpeechMistakes(text) {
     .replaceAll("দুর্যোগ", " disaster ")
     .replaceAll("সাইবার", " cyber ")
     .replaceAll("হ্যাক", " hack ")
+    .replaceAll("প্রতারণা", " fraud ")
     .replaceAll("পানি", " water ")
+    .replaceAll("পানির", " water ")
     .replaceAll("ওয়াসা", " wasa ")
+    .replaceAll("ওয়াসা", " wasa ")
     .replaceAll("বিদ্যুৎ", " electricity ")
     .replaceAll("কারেন্ট", " electricity ")
+    .replaceAll("গ্যাস", " gas ")
     .replaceAll("গাছ পড়ে", " fallen tree ")
     .replaceAll("গাছ পড়ে", " fallen tree ")
-    .replaceAll("গাছ ভেঙে", " fallen tree ");
+    .replaceAll("নির্বাচন কমিশন", " election commission ")
+    .replaceAll("স্বাস্থ্য বাতায়ন", " health batayon ")
+    .replaceAll("স্বাস্থ্য বাতায়ন", " health batayon ")
+    .replaceAll("র‍্যাব", " rab ")
+    .replaceAll("র্যাব", " rab ")
+    .replaceAll("রাব", " rab ")
+    .replaceAll("রেব", " rab ");
 }
 
 function getSafeHelplineRoute(category, transcript) {
@@ -228,7 +282,7 @@ function getSafeHelplineRoute(category, transcript) {
   if (includesAny(text, ["ambulance", "accident", "injured", "blood", "medical emergency", "unconscious"])) {
     return { isEmergency: true, emergencyType: "Medical / Ambulance Emergency", helpline: helplines.nationalEmergency, secondaryHelpline: helplines.health, liveTrackingRequired: true };
   }
-  if (includesAny(text, ["woman", "women", "harassment", "abuse", "violence", "assault", "rape"])) {
+  if (includesAny(text, ["women", "harassment", "abuse", "violence", "assault", "rape"])) {
     return { isEmergency: true, emergencyType: "Women / Child Safety Emergency", helpline: helplines.womenChildProtection, secondaryHelpline: helplines.nationalEmergency, liveTrackingRequired: true };
   }
   if (includesAny(text, ["child"]) && includesAny(text, ["danger", "missing", "abuse", "violence", "kidnap"])) {
@@ -243,7 +297,9 @@ function getSafeHelplineRoute(category, transcript) {
   if (includesAny(text, ["water", "wasa"])) return { isEmergency: false, emergencyType: null, helpline: helplines.dhakaWasa, secondaryHelpline: null, liveTrackingRequired: false };
   if (includesAny(text, ["electricity", "power", "current", "dpdc"])) return { isEmergency: false, emergencyType: null, helpline: helplines.dpdc, secondaryHelpline: null, liveTrackingRequired: false };
   if (includesAny(text, ["cyber", "hack", "hacked", "fraud", "scam"])) return { isEmergency: false, emergencyType: null, helpline: helplines.cyberCrime, secondaryHelpline: null, liveTrackingRequired: false };
-  if (includesAny(text, ["health", "doctor", "hospital", "medicine"])) return { isEmergency: false, emergencyType: null, helpline: helplines.health, secondaryHelpline: null, liveTrackingRequired: false };
+  if (includesAny(text, ["health batayon", "health", "doctor", "hospital", "medicine"])) return { isEmergency: false, emergencyType: null, helpline: helplines.health, secondaryHelpline: null, liveTrackingRequired: false };
+  if (includesAny(text, ["election commission", "voter", "vote", "ec"])) return { isEmergency: false, emergencyType: null, helpline: helplines.electionCommission, secondaryHelpline: null, liveTrackingRequired: false };
+  if (includesAny(text, ["rab", "rapid action battalion"])) return { isEmergency: false, emergencyType: null, helpline: helplines.rab, secondaryHelpline: null, liveTrackingRequired: false };
   if (includesAny(text, ["nid", "national id", "voter id"])) return { isEmergency: false, emergencyType: null, helpline: helplines.nid, secondaryHelpline: null, liveTrackingRequired: false };
   if (includesAny(text, ["railway", "train", "ticket"])) return { isEmergency: false, emergencyType: null, helpline: helplines.railway, secondaryHelpline: null, liveTrackingRequired: false };
   if (includesAny(text, ["bank", "loan", "money", "financial"])) return { isEmergency: false, emergencyType: null, helpline: helplines.bangladeshBank, secondaryHelpline: null, liveTrackingRequired: false };
@@ -262,12 +318,11 @@ function safeJsonParse(text) {
 function repairReport(report, transcript) {
   const category = String(report.category || "General Citizen Service Request");
   const route = getSafeHelplineRoute(category, transcript);
-
   return {
     intent: String(report.intent || "Help Request"),
     category,
     location: String(report.location || "Current user area"),
-    summary: String(report.summary || `The citizen said: "${transcript}". CivicFlow AI prepared this as a citizen service request.`),
+    summary: String(report.summary || `The citizen said: "${transcript}". CivicFlow AI prepared this help route.`),
     recommendedAction: String(report.recommendedAction || `Contact ${route.helpline.title} ${route.helpline.number}.`),
     confidence: typeof report.confidence === "number" && report.confidence >= 0 ? Math.min(report.confidence, 1) : 0.85,
     isEmergency: route.isEmergency,
@@ -286,83 +341,224 @@ function repairReport(report, transcript) {
 }
 
 function buildRepeatReport(reason) {
-  return repairReport(
-    {
-      intent: "Voice Clarification Needed",
-      category: "Voice Needs Repeat",
-      location: "Current user area",
-      summary: reason || "CivicFlow AI could not hear enough speech from the recording.",
-      recommendedAction: "Please speak again clearly and keep the phone close to the mouth.",
-      confidence: 0,
-    },
-    "Audio unclear"
-  );
+  return repairReport({
+    intent: "Voice Clarification Needed",
+    category: "Voice Needs Repeat",
+    location: "Current user area",
+    summary: reason || "CivicFlow AI could not hear enough speech from the recording.",
+    recommendedAction: "Please speak again clearly and keep the phone close to the mouth.",
+    confidence: 0,
+  }, "Audio unclear");
 }
 
 function isQuotaError(message) {
   const clean = String(message || "").toLowerCase();
-  return clean.includes("quota") || clean.includes("rate limit") || clean.includes("resource_exhausted");
+  return clean.includes("quota") || clean.includes("rate limit") || clean.includes("resource_exhausted") || clean.includes("429");
 }
 
 function cleanAiErrorMessage(message) {
   return isQuotaError(message)
-    ? "Gemini AI quota is currently unavailable. The app used the fallback safety router instead."
-    : "Gemini AI is temporarily unavailable. The app used the fallback safety router instead.";
+    ? "Gemini AI quota is currently unavailable. Azure Speech fallback was attempted."
+    : "Gemini AI is temporarily unavailable. Azure Speech fallback was attempted.";
 }
 
 async function callGemini(parts, responseMimeType = "application/json") {
-  if (!GEMINI_API_KEY) {
-    throw new Error("Missing GEMINI_API_KEY environment variable.");
-  }
-
-  const timeoutRaw = Number(process.env.GEMINI_TIMEOUT_MS || 25000);
-  const timeoutMs = Number.isFinite(timeoutRaw)
-    ? Math.min(Math.max(timeoutRaw, 5000), 60000)
-    : 25000;
+  if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY environment variable.");
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
+  const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
   try {
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-
     const response = await fetch(endpoint, {
       method: "POST",
       signal: controller.signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts }],
-        generationConfig: {
-          responseMimeType,
-        },
-      }),
+      body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0, responseMimeType } }),
     });
 
     let data = {};
-    try {
-      data = await response.json();
-    } catch (_) {
-      data = {};
-    }
-
-    if (!response.ok) {
-      throw new Error(data.error?.message || "Gemini API request failed.");
-    }
-
-    return (
-      data.candidates?.[0]?.content?.parts?.[0]?.text ||
-      data.candidates?.[0]?.content?.parts?.map((part) => part.text).join("") ||
-      ""
-    );
+    try { data = await response.json(); } catch (_) { data = {}; }
+    if (!response.ok) throw new Error(data.error?.message || "Gemini API request failed.");
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || data.candidates?.[0]?.content?.parts?.map((part) => part.text).join("") || "";
   } catch (error) {
-    if (error.name === "AbortError") {
-      throw new Error(`Gemini API request timed out after ${timeoutMs} ms.`);
-    }
-
+    if (error.name === "AbortError") throw new Error(`Gemini API request timed out after ${GEMINI_TIMEOUT_MS} ms.`);
     throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function analyzeWithGemini(transcript) {
+  const prompt = `You are CivicFlow AI, a Bangladesh civic and emergency help-routing assistant.
+Understand Bangla, English, Banglish, and regional Bangla.
+Return ONLY valid JSON.
+Do not use low/medium/high/critical severity words.
+
+User transcript:
+"${transcript}"
+
+Return this JSON:
+{"intent":"string","category":"string","location":"Current user area","summary":"string","recommendedAction":"string","confidence":0.0}
+
+Routing:
+- Fire, smoke, burning, আগুন = Fire / Rescue Emergency.
+- Kidnap, abduction, missing child = Kidnapping / Abduction Emergency.
+- Accident, injured, ambulance = Medical / Ambulance Emergency.
+- Harassment, abuse, violence, women/child safety = Women / Child Safety Emergency.
+- Theft, robbery, attack, danger = Police / Safety Emergency.
+- No water, water supply, WASA = Water Supply Problem.
+- Electricity, power, current issue = Electricity Problem.
+- Cyber crime, hacked, online fraud = Cyber Crime / Online Fraud.
+- Specific contact request like RAB, Election Commission, Health Batayon = Specific Helpline Contact Request.`;
+
+  return repairReport(safeJsonParse(await callGemini([{ text: prompt }])), transcript);
+}
+
+async function analyzeAudioWithGemini(audioBase64, mimeType) {
+  const prompt = `You are CivicFlow AI for Bangladesh.
+You will receive a short citizen voice recording. The speaker may speak Bangla, English, Banglish, or regional Bangla.
+Task: transcribe the audio, normalize the meaning, and create the correct civic/emergency help route.
+Do NOT say unclear unless there is almost no human voice.
+Return ONLY valid JSON:
+{"detectedLanguage":"Bangla | English | Banglish | Mixed | Regional Bangla | Unknown","originalTranscript":"string","banglaTranscript":"string","englishTranslation":"string","banglishRoman":"string","transcriptionConfidence":0.0,"needsRepeat":false,"repeatReason":"string","report":{"intent":"string","category":"string","location":"Current user area","summary":"string","recommendedAction":"string","confidence":0.0}}
+Routing: fire/আগুন=Fire / Rescue Emergency; kidnap/অপহরণ=Kidnapping / Abduction Emergency; ambulance/accident=Medical / Ambulance Emergency; harassment/নির্যাতন=Women / Child Safety Emergency; police/danger=Police / Safety Emergency; water/WASA=Water Supply Problem; electricity/current=Electricity Problem; cyber/fraud=Cyber Crime / Online Fraud; RAB/election/health batayon number request=Specific Helpline Contact Request.`;
+
+  const parsed = safeJsonParse(await callGemini([{ text: prompt }, { inlineData: { mimeType, data: audioBase64 } }]));
+  return buildAudioAnalysisResponseFromParsed(parsed, "gemini-audio");
+}
+
+function buildAudioAnalysisResponseFromParsed(parsed, modeLabel) {
+  const originalTranscript = String(parsed.originalTranscript || parsed.banglaTranscript || parsed.englishTranslation || parsed.banglishRoman || "").trim();
+  const allText = normalize(`${originalTranscript} ${parsed.banglaTranscript || ""} ${parsed.englishTranslation || ""} ${parsed.banglishRoman || ""} ${parsed.report?.category || ""} ${parsed.report?.summary || ""}`);
+  const trulyEmpty = originalTranscript.length < 2 || includesAny(allText, ["no human voice", "no speech", "silence", "empty audio", "cannot hear", "inaudible"]);
+
+  if (trulyEmpty) {
+    return {
+      detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
+      originalTranscript: originalTranscript || "Audio unclear.",
+      banglaTranscript: String(parsed.banglaTranscript || ""),
+      englishTranslation: String(parsed.englishTranslation || ""),
+      banglishRoman: String(parsed.banglishRoman || ""),
+      report: buildRepeatReport(parsed.repeatReason || "The recording did not contain enough clear human voice."),
+    };
+  }
+
+  return {
+    detectedLanguage: String(parsed.detectedLanguage || "Unknown"),
+    originalTranscript,
+    banglaTranscript: String(parsed.banglaTranscript || ""),
+    englishTranslation: String(parsed.englishTranslation || ""),
+    banglishRoman: String(parsed.banglishRoman || ""),
+    report: repairReport(parsed.report || {}, allText),
+    fallbackProvider: modeLabel,
+  };
+}
+
+function isAzureSpeechConfigured() {
+  return AZURE_SPEECH_ENABLED && AZURE_SPEECH_KEY && AZURE_SPEECH_REGION;
+}
+
+function azureLanguagesToTry() {
+  const fromEnv = AZURE_SPEECH_LANGUAGE.split(",").map((x) => x.trim()).filter(Boolean);
+  const list = fromEnv.length ? fromEnv : ["bn-BD"];
+  if (!list.includes("bn-BD")) list.push("bn-BD");
+  if (!list.includes("en-US")) list.push("en-US");
+  return list;
+}
+
+function audioExtensionFromMime(mimeType) {
+  const clean = String(mimeType || "").toLowerCase();
+  if (clean.includes("wav")) return ".wav";
+  if (clean.includes("ogg")) return ".ogg";
+  if (clean.includes("webm")) return ".webm";
+  if (clean.includes("mpeg") || clean.includes("mp3")) return ".mp3";
+  if (clean.includes("aac")) return ".aac";
+  if (clean.includes("mp4") || clean.includes("m4a")) return ".m4a";
+  return ".audio";
+}
+
+async function convertAudioToWavPcm16k(audioBuffer, mimeType) {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "civicflow-audio-"));
+  const inputPath = path.join(workDir, `input${audioExtensionFromMime(mimeType)}`);
+  const outputPath = path.join(workDir, "output.wav");
+
+  try {
+    await fs.writeFile(inputPath, audioBuffer);
+    await execFileAsync(ffmpegInstaller.path, ["-y", "-hide_banner", "-loglevel", "error", "-i", inputPath, "-ac", "1", "-ar", "16000", "-f", "wav", outputPath], { timeout: 20000, maxBuffer: 1024 * 1024 });
+    return await fs.readFile(outputPath);
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function transcribeWithAzureSpeech(audioBase64, mimeType) {
+  if (!isAzureSpeechConfigured()) throw new Error("Azure Speech fallback is not configured.");
+
+  const originalBuffer = Buffer.from(audioBase64, "base64");
+  if (!originalBuffer.length) throw new Error("Audio buffer is empty.");
+
+  const wavBuffer = await convertAudioToWavPcm16k(originalBuffer, mimeType);
+  let lastError = null;
+
+  for (const language of azureLanguagesToTry()) {
+    try {
+      const endpoint = `https://${AZURE_SPEECH_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${encodeURIComponent(language)}&format=detailed`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), AZURE_SPEECH_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+            "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
+            Accept: "application/json",
+          },
+          body: wavBuffer,
+        });
+
+        let data = {};
+        try { data = await response.json(); } catch (_) { data = {}; }
+        if (!response.ok) throw new Error(data.error?.message || data.message || `Azure Speech request failed with HTTP ${response.status}.`);
+
+        const displayText = String(data.DisplayText || data.NBest?.[0]?.Display || data.NBest?.[0]?.Lexical || "").trim();
+        const status = String(data.RecognitionStatus || "");
+        if (displayText && !["NoMatch", "InitialSilenceTimeout", "BabbleTimeout"].includes(status)) {
+          return { transcript: displayText, language, raw: data };
+        }
+
+        lastError = new Error(`Azure Speech returned no useful transcript for ${language}. Status: ${status || "unknown"}.`);
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (error) {
+      if (error.name === "AbortError") {
+        lastError = new Error(`Azure Speech timed out after ${AZURE_SPEECH_TIMEOUT_MS} ms.`);
+      } else {
+        lastError = error;
+      }
+    }
+  }
+
+  throw lastError || new Error("Azure Speech could not transcribe the audio.");
+}
+
+async function analyzeAudioWithAzureFallback(audioBase64, mimeType, geminiError) {
+  const azure = await transcribeWithAzureSpeech(audioBase64, mimeType);
+  const analysis = await analyzeTranscript(azure.transcript);
+  const isBangla = azure.language.toLowerCase().startsWith("bn");
+
+  return {
+    detectedLanguage: isBangla ? "Bangla / Azure Speech" : `${azure.language} / Azure Speech`,
+    originalTranscript: azure.transcript,
+    banglaTranscript: isBangla ? azure.transcript : "",
+    englishTranslation: isBangla ? "" : azure.transcript,
+    banglishRoman: "",
+    report: analysis.report,
+    azureLanguage: azure.language,
+    geminiAudioError: cleanAiErrorMessage(geminiError?.message || geminiError),
+  };
 }
 
 function analyzeWithRules(transcript) {
@@ -371,24 +567,23 @@ function analyzeWithRules(transcript) {
   if (includesAny(text, ["fire", "smoke", "burning"])) category = "Fire / Rescue Emergency";
   else if (includesAny(text, ["kidnap", "kidnapped", "missing", "abduction"])) category = "Kidnapping / Abduction Emergency";
   else if (includesAny(text, ["ambulance", "accident", "injured", "blood"])) category = "Medical / Ambulance Emergency";
-  else if (includesAny(text, ["woman", "harassment", "abuse", "violence"])) category = "Women / Child Safety Emergency";
+  else if (includesAny(text, ["women", "harassment", "abuse", "violence"])) category = "Women / Child Safety Emergency";
   else if (includesAny(text, ["police", "theft", "robbery", "attack", "danger", "emergency", "help lagbe"])) category = "Police / Safety Emergency";
   else if (includesAny(text, ["cyclone", "flood", "earthquake", "disaster"])) category = "Disaster Emergency";
   else if (includesAny(text, ["water", "wasa"])) category = "Water Supply Problem";
   else if (includesAny(text, ["electricity", "power", "current"])) category = "Electricity Problem";
-  else if (includesAny(text, ["cyber", "hack", "fraud"])) category = "Cyber Crime / Online Fraud";
+  else if (includesAny(text, ["cyber", "hack", "fraud", "scam"])) category = "Cyber Crime / Online Fraud";
+  else if (includesAny(text, ["election commission", "voter"])) category = "Specific Helpline Contact Request";
+  else if (includesAny(text, ["rab", "health batayon"])) category = "Specific Helpline Contact Request";
 
-  return repairReport(
-    {
-      intent: "Help Request",
-      category,
-      location: "Current user area",
-      summary: `The citizen said: "${transcript}". CivicFlow AI prepared this help route.`,
-      recommendedAction: "Contact the recommended help service.",
-      confidence: 0.8,
-    },
-    transcript
-  );
+  return repairReport({
+    intent: "Help Request",
+    category,
+    location: "Current user area",
+    summary: `The citizen said: "${transcript}". CivicFlow AI prepared this help route.`,
+    recommendedAction: "Contact the recommended help service.",
+    confidence: 0.8,
+  }, transcript);
 }
 
 async function analyzeTranscript(transcript) {
@@ -405,7 +600,6 @@ function sanitizeLocationData(locationData) {
   const longitude = Number(locationData.longitude);
   const accuracyMeters = Number(locationData.accuracyMeters);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-
   return {
     latitude,
     longitude,
@@ -425,26 +619,13 @@ function mergeLocationIntoReport(report, locationData) {
 async function saveReport(savedReport) {
   memoryReports.unshift(savedReport);
   if (memoryReports.length > 100) memoryReports.pop();
-
   if (!firestoreDb) return { storage: "memory", firebaseStatus, firebaseError };
-
-  await firestoreDb.collection(REPORT_COLLECTION).doc(savedReport.id).set(
-    {
-      ...savedReport,
-      createdAtMs: savedReport.createdAtMs || Date.now(),
-      updatedAtMs: Date.now(),
-      updatedAt: new Date().toISOString(),
-      storageSource: "firebase-firestore",
-    },
-    { merge: true }
-  );
-
+  await firestoreDb.collection(REPORT_COLLECTION).doc(savedReport.id).set({ ...savedReport, createdAtMs: savedReport.createdAtMs || Date.now(), updatedAtMs: Date.now(), updatedAt: new Date().toISOString(), storageSource: "firebase-firestore" }, { merge: true });
   return { storage: "firebase-firestore", firebaseStatus, firebaseError: null };
 }
 
 async function loadReports() {
   if (!firestoreDb) return { reports: memoryReports, storage: "memory", firebaseStatus, firebaseError };
-
   try {
     const snapshot = await firestoreDb.collection(REPORT_COLLECTION).orderBy("createdAtMs", "desc").limit(100).get();
     return { reports: snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })), storage: "firebase-firestore", firebaseStatus, firebaseError: null };
@@ -457,16 +638,13 @@ async function updateReportStatus(reportId, status, adminNote) {
   const cleanedReportId = String(reportId || "").trim();
   const cleanedStatus = String(status || "").trim();
   const cleanedAdminNote = String(adminNote || "").trim().slice(0, 2000);
-
   if (!cleanedReportId) throw new Error("Missing report ID.");
   if (!STATUS_OPTIONS.includes(cleanedStatus)) throw new Error("Invalid report status.");
 
   const updatePayload = { status: cleanedStatus, adminNote: cleanedAdminNote, updatedAt: new Date().toISOString(), updatedAtMs: Date.now() };
   const index = memoryReports.findIndex((item) => item.id === cleanedReportId);
   if (index !== -1) memoryReports[index] = { ...memoryReports[index], ...updatePayload };
-
   if (!firestoreDb) return { storage: "memory", firebaseStatus, firebaseError };
-
   await firestoreDb.collection(REPORT_COLLECTION).doc(cleanedReportId).set(updatePayload, { merge: true });
   return { storage: "firebase-firestore", firebaseStatus, firebaseError: null };
 }
@@ -501,56 +679,29 @@ async function updateReportLiveFields(session) {
   const payload = buildReportLiveUpdatePayload(session);
   const index = memoryReports.findIndex((item) => item.id === session.reportId);
   if (index !== -1) memoryReports[index] = { ...memoryReports[index], ...payload };
-
   if (!firestoreDb || !session.reportId) return;
-
-  try {
-    await firestoreDb.collection(REPORT_COLLECTION).doc(session.reportId).set(payload, { merge: true });
-  } catch (error) {
-    console.error("Failed to update report live fields:", error.message);
-  }
+  try { await firestoreDb.collection(REPORT_COLLECTION).doc(session.reportId).set(payload, { merge: true }); } catch (error) { console.error("Failed to update report live fields:", error.message); }
 }
 
 async function saveLiveSession(session) {
   memoryLiveSessions.set(session.id, session);
   if (!firestoreDb) return { storage: "memory", firebaseStatus, firebaseError };
-
-  await firestoreDb.collection(LIVE_SESSION_COLLECTION).doc(session.id).set(
-    {
-      ...session,
-      updatedAtMs: Date.now(),
-      storageSource: "firebase-firestore",
-    },
-    { merge: true }
-  );
-
+  await firestoreDb.collection(LIVE_SESSION_COLLECTION).doc(session.id).set({ ...session, updatedAtMs: Date.now(), storageSource: "firebase-firestore" }, { merge: true });
   return { storage: "firebase-firestore", firebaseStatus, firebaseError: null };
 }
 
 async function saveLiveLocationPoint(session, locationData, sequence) {
   if (!firestoreDb) return;
-
   try {
     const id = `${String(sequence || 0).padStart(6, "0")}_${Date.now()}`;
-    await firestoreDb.collection(LIVE_SESSION_COLLECTION).doc(session.id).collection("points").doc(id).set({
-      sessionId: session.id,
-      reportId: session.reportId,
-      sequence,
-      locationData,
-      capturedAtIso: locationData.capturedAtIso,
-      createdAtIso: new Date().toISOString(),
-      createdAtMs: Date.now(),
-    });
+    await firestoreDb.collection(LIVE_SESSION_COLLECTION).doc(session.id).collection("points").doc(id).set({ sessionId: session.id, reportId: session.reportId, sequence, locationData, capturedAtIso: locationData.capturedAtIso, createdAtIso: new Date().toISOString(), createdAtMs: Date.now() });
   } catch (error) {
     console.error("Failed to save live point:", error.message);
   }
 }
 
 async function loadLiveSessions(limit = 50) {
-  if (!firestoreDb) {
-    return Array.from(memoryLiveSessions.values()).sort((a, b) => Number(b.updatedAtMs || 0) - Number(a.updatedAtMs || 0)).slice(0, limit);
-  }
-
+  if (!firestoreDb) return Array.from(memoryLiveSessions.values()).sort((a, b) => Number(b.updatedAtMs || 0) - Number(a.updatedAtMs || 0)).slice(0, limit);
   try {
     const snapshot = await firestoreDb.collection(LIVE_SESSION_COLLECTION).orderBy("updatedAtMs", "desc").limit(limit).get();
     return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
@@ -565,7 +716,6 @@ async function loadLiveSessionById(sessionId) {
   if (!id) return null;
   if (memoryLiveSessions.has(id)) return memoryLiveSessions.get(id);
   if (!firestoreDb) return null;
-
   try {
     const doc = await firestoreDb.collection(LIVE_SESSION_COLLECTION).doc(id).get();
     return doc.exists ? { id: doc.id, ...doc.data() } : null;
@@ -573,126 +723,6 @@ async function loadLiveSessionById(sessionId) {
     console.error("Failed to load live session:", error.message);
     return null;
   }
-}
-
-async function handleLiveTrackingStart(req, res) {
-  try {
-    const body = await readJsonBody(req);
-    const reportId = String(body.reportId || "").trim();
-    const durationRaw = Number(body.durationMinutes || 30);
-    const durationMinutes = Number.isFinite(durationRaw) ? Math.min(Math.max(durationRaw, 1), 120) : 30;
-    const firstLocation = sanitizeLocationData(body.initialLocation);
-
-    if (!reportId) return sendJson(res, 400, { ok: false, error: "Missing reportId." });
-    if (!firstLocation) return sendJson(res, 400, { ok: false, error: "Missing valid initialLocation for live tracking." });
-
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + durationMinutes * 60 * 1000);
-    const liveSession = {
-      id: makeId("live"),
-      reportId,
-      status: "active",
-      source: String(body.source || "flutter-app"),
-      transcript: body.transcript || null,
-      report: body.report || null,
-      durationMinutes,
-      startedAtIso: now.toISOString(),
-      expiresAtIso: expiresAt.toISOString(),
-      startedAtMs: now.getTime(),
-      expiresAtMs: expiresAt.getTime(),
-      latestLocation: firstLocation,
-      lastLocationAtIso: firstLocation.capturedAtIso,
-      updateCount: 1,
-      lastSequence: 0,
-      updatedAtIso: now.toISOString(),
-      updatedAtMs: now.getTime(),
-      stopReason: null,
-    };
-
-    const storageResult = await saveLiveSession(liveSession);
-    await saveLiveLocationPoint(liveSession, firstLocation, 0);
-    await updateReportLiveFields(liveSession);
-
-    sendJson(res, 201, { ok: true, message: "Emergency live tracking started.", liveSession, ...storageResult });
-  } catch (error) {
-    sendJson(res, 500, { ok: false, error: error.message });
-  }
-}
-
-async function handleLiveTrackingUpdate(req, res) {
-  try {
-    const body = await readJsonBody(req);
-    const sessionId = String(body.sessionId || "").trim();
-    const reportId = String(body.reportId || "").trim();
-    const sequence = Number(body.sequence || 0);
-    const cleanLocation = sanitizeLocationData(body.locationData);
-
-    if (!sessionId) return sendJson(res, 400, { ok: false, error: "Missing sessionId." });
-    if (!cleanLocation) return sendJson(res, 400, { ok: false, error: "Missing valid locationData." });
-
-    const existing = await loadLiveSessionById(sessionId);
-    if (!existing) return sendJson(res, 404, { ok: false, error: "Live tracking session not found." });
-
-    const status = getLiveSessionComputedStatus(existing);
-    const updated = {
-      ...existing,
-      reportId: existing.reportId || reportId,
-      status: status === "expired" ? "expired" : "active",
-      latestLocation: cleanLocation,
-      lastLocationAtIso: cleanLocation.capturedAtIso,
-      lastSequence: Number.isFinite(sequence) ? sequence : existing.lastSequence || 0,
-      updateCount: Number(existing.updateCount || 0) + 1,
-      updatedAtIso: new Date().toISOString(),
-      updatedAtMs: Date.now(),
-    };
-
-    const storageResult = await saveLiveSession(updated);
-    await saveLiveLocationPoint(updated, cleanLocation, updated.lastSequence);
-    await updateReportLiveFields(updated);
-
-    sendJson(res, 200, {
-      ok: true,
-      message: updated.status === "expired" ? "Live tracking session has expired. Last location saved." : "Live location updated.",
-      liveSession: updated,
-      ...storageResult,
-    });
-  } catch (error) {
-    sendJson(res, 500, { ok: false, error: error.message });
-  }
-}
-
-async function handleLiveTrackingStop(req, res) {
-  try {
-    const body = await readJsonBody(req);
-    const sessionId = String(body.sessionId || "").trim();
-    const reason = String(body.reason || "Live tracking stopped.").slice(0, 300);
-
-    if (!sessionId) return sendJson(res, 400, { ok: false, error: "Missing sessionId." });
-
-    const existing = await loadLiveSessionById(sessionId);
-    if (!existing) return sendJson(res, 404, { ok: false, error: "Live tracking session not found." });
-
-    const stopped = {
-      ...existing,
-      status: reason.toLowerCase().includes("expired") ? "expired" : "stopped",
-      stopReason: reason,
-      stoppedAtIso: body.stoppedAtIso || new Date().toISOString(),
-      updatedAtIso: new Date().toISOString(),
-      updatedAtMs: Date.now(),
-    };
-
-    const storageResult = await saveLiveSession(stopped);
-    await updateReportLiveFields(stopped);
-
-    sendJson(res, 200, { ok: true, message: reason, liveSession: stopped, ...storageResult });
-  } catch (error) {
-    sendJson(res, 500, { ok: false, error: error.message });
-  }
-}
-
-async function handleLiveTrackingList(req, res) {
-  const sessions = await loadLiveSessions(100);
-  sendJson(res, 200, { ok: true, totalSessions: sessions.length, liveSessions: sessions, storage: firestoreDb ? "firebase-firestore" : "memory", firebaseStatus, firebaseError });
 }
 
 async function handleAnalyzeText(req, res) {
@@ -709,20 +739,43 @@ async function handleAnalyzeAudio(req, res) {
   try {
     const body = await readJsonBody(req);
     if (!body.audioBase64 || typeof body.audioBase64 !== "string") return sendJson(res, 400, { ok: false, error: "Missing audioBase64" });
+    const mimeType = body.mimeType || "audio/mp4";
 
     try {
-      sendJson(res, 200, { ok: true, mode: "gemini-audio", ...(await analyzeAudioWithGemini(body.audioBase64, body.mimeType || "audio/mp4")) });
-    } catch (error) {
-      sendJson(res, 200, {
+      const geminiResult = await analyzeAudioWithGemini(body.audioBase64, mimeType);
+      return sendJson(res, 200, { ok: true, mode: "gemini-audio", ...geminiResult });
+    } catch (geminiError) {
+      console.warn("Gemini audio failed. Trying Azure Speech fallback:", geminiError.message);
+      if (isAzureSpeechConfigured()) {
+        try {
+          const azureResult = await analyzeAudioWithAzureFallback(body.audioBase64, mimeType, geminiError);
+          return sendJson(res, 200, { ok: true, mode: "azure-speech-fallback", ...azureResult });
+        } catch (azureError) {
+          console.error("Azure Speech fallback failed:", azureError.message);
+          return sendJson(res, 200, {
+            ok: false,
+            mode: "audio-ai-unavailable",
+            error: `${cleanAiErrorMessage(geminiError.message)} Azure fallback failed: ${azureError.message}`,
+            detectedLanguage: "Unknown",
+            originalTranscript: "Audio transcript unavailable.",
+            banglaTranscript: "",
+            englishTranslation: "",
+            banglishRoman: "",
+            report: buildRepeatReport("Gemini and Azure Speech could not understand the audio. Please speak again."),
+          });
+        }
+      }
+
+      return sendJson(res, 200, {
         ok: false,
         mode: "audio-ai-unavailable",
-        error: cleanAiErrorMessage(error.message),
+        error: cleanAiErrorMessage(geminiError.message),
         detectedLanguage: "Unknown",
         originalTranscript: "Audio transcript unavailable.",
         banglaTranscript: "",
         englishTranslation: "",
         banglishRoman: "",
-        report: buildRepeatReport("The backend received the audio, but real AI audio understanding is temporarily unavailable."),
+        report: buildRepeatReport("The backend received the audio, but AI audio understanding is temporarily unavailable."),
       });
     }
   } catch (error) {
@@ -734,7 +787,6 @@ async function handleSubmitReport(req, res) {
   try {
     const body = await readJsonBody(req);
     if (!body.report || typeof body.report !== "object") return sendJson(res, 400, { ok: false, error: "Missing report object" });
-
     const nowIso = new Date().toISOString();
     const savedReport = {
       id: makeId("civicflow"),
@@ -752,7 +804,6 @@ async function handleSubmitReport(req, res) {
       liveSessionId: null,
       report: mergeLocationIntoReport(body.report, body.locationData),
     };
-
     const storageResult = await saveReport(savedReport);
     sendJson(res, 201, { ok: true, message: "Report received by CivicFlow AI backend.", savedReport, totalReports: memoryReports.length, ...storageResult });
   } catch (error) {
@@ -775,6 +826,73 @@ async function handleTest(req, res, url) {
   sendJson(res, 200, { ok: true, input: text, ...(await analyzeTranscript(text)) });
 }
 
+async function handleLiveTrackingStart(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const reportId = String(body.reportId || "").trim();
+    const durationRaw = Number(body.durationMinutes || 30);
+    const durationMinutes = Number.isFinite(durationRaw) ? Math.min(Math.max(durationRaw, 1), 120) : 30;
+    const firstLocation = sanitizeLocationData(body.initialLocation);
+    if (!reportId) return sendJson(res, 400, { ok: false, error: "Missing reportId." });
+    if (!firstLocation) return sendJson(res, 400, { ok: false, error: "Missing valid initialLocation for live tracking." });
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + durationMinutes * 60 * 1000);
+    const liveSession = { id: makeId("live"), reportId, status: "active", source: String(body.source || "flutter-app"), transcript: body.transcript || null, report: body.report || null, durationMinutes, startedAtIso: now.toISOString(), expiresAtIso: expiresAt.toISOString(), startedAtMs: now.getTime(), expiresAtMs: expiresAt.getTime(), latestLocation: firstLocation, lastLocationAtIso: firstLocation.capturedAtIso, updateCount: 1, lastSequence: 0, updatedAtIso: now.toISOString(), updatedAtMs: now.getTime(), stopReason: null };
+    const storageResult = await saveLiveSession(liveSession);
+    await saveLiveLocationPoint(liveSession, firstLocation, 0);
+    await updateReportLiveFields(liveSession);
+    sendJson(res, 201, { ok: true, message: "Emergency live tracking started.", liveSession, ...storageResult });
+  } catch (error) {
+    sendJson(res, 500, { ok: false, error: error.message });
+  }
+}
+
+async function handleLiveTrackingUpdate(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const sessionId = String(body.sessionId || "").trim();
+    const reportId = String(body.reportId || "").trim();
+    const sequence = Number(body.sequence || 0);
+    const cleanLocation = sanitizeLocationData(body.locationData);
+    if (!sessionId) return sendJson(res, 400, { ok: false, error: "Missing sessionId." });
+    if (!cleanLocation) return sendJson(res, 400, { ok: false, error: "Missing valid locationData." });
+
+    const existing = await loadLiveSessionById(sessionId);
+    if (!existing) return sendJson(res, 404, { ok: false, error: "Live tracking session not found." });
+    const status = getLiveSessionComputedStatus(existing);
+    const updated = { ...existing, reportId: existing.reportId || reportId, status: status === "expired" ? "expired" : "active", latestLocation: cleanLocation, lastLocationAtIso: cleanLocation.capturedAtIso, lastSequence: Number.isFinite(sequence) ? sequence : existing.lastSequence || 0, updateCount: Number(existing.updateCount || 0) + 1, updatedAtIso: new Date().toISOString(), updatedAtMs: Date.now() };
+    const storageResult = await saveLiveSession(updated);
+    await saveLiveLocationPoint(updated, cleanLocation, updated.lastSequence);
+    await updateReportLiveFields(updated);
+    sendJson(res, 200, { ok: true, message: updated.status === "expired" ? "Live tracking session has expired. Last location saved." : "Live location updated.", liveSession: updated, ...storageResult });
+  } catch (error) {
+    sendJson(res, 500, { ok: false, error: error.message });
+  }
+}
+
+async function handleLiveTrackingStop(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const sessionId = String(body.sessionId || "").trim();
+    const reason = String(body.reason || "Live tracking stopped.").slice(0, 300);
+    if (!sessionId) return sendJson(res, 400, { ok: false, error: "Missing sessionId." });
+    const existing = await loadLiveSessionById(sessionId);
+    if (!existing) return sendJson(res, 404, { ok: false, error: "Live tracking session not found." });
+    const stopped = { ...existing, status: reason.toLowerCase().includes("expired") ? "expired" : "stopped", stopReason: reason, stoppedAtIso: body.stoppedAtIso || new Date().toISOString(), updatedAtIso: new Date().toISOString(), updatedAtMs: Date.now() };
+    const storageResult = await saveLiveSession(stopped);
+    await updateReportLiveFields(stopped);
+    sendJson(res, 200, { ok: true, message: reason, liveSession: stopped, ...storageResult });
+  } catch (error) {
+    sendJson(res, 500, { ok: false, error: error.message });
+  }
+}
+
+async function handleLiveTrackingList(req, res) {
+  const sessions = await loadLiveSessions(100);
+  sendJson(res, 200, { ok: true, totalSessions: sessions.length, liveSessions: sessions, storage: firestoreDb ? "firebase-firestore" : "memory", firebaseStatus, firebaseError });
+}
+
 function formatDateTime(value) {
   try {
     const date = new Date(value);
@@ -792,7 +910,7 @@ function buildStatusOptions(currentStatus) {
 }
 
 function buildDashboardLoginPage(message = "") {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CivicFlow AI Admin Login</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(135deg,#f8fafc 0%,#e0f2fe 48%,#eef2ff 100%);color:#0f172a;font-family:Inter,Arial,sans-serif;padding:20px}.card{width:100%;max-width:460px;background:rgba(255,255,255,.94);border:1px solid rgba(148,163,184,.28);border-radius:30px;padding:30px;box-shadow:0 24px 70px rgba(15,23,42,.12)}h1{margin:0 0 8px;font-size:32px;letter-spacing:-.04em}p{color:#64748b;line-height:1.55;margin:0 0 22px}label{font-size:13px;color:#475569;font-weight:900;letter-spacing:.08em;text-transform:uppercase}input{width:100%;margin-top:8px;padding:15px;border-radius:16px;border:1px solid #dbe3ef;background:#f8fafc;color:#0f172a;outline:none;font-weight:800}input:focus{border-color:#38bdf8;box-shadow:0 0 0 4px rgba(56,189,248,.16)}button{width:100%;margin-top:16px;padding:15px;border:0;border-radius:999px;background:#0284c7;color:#fff;font-weight:950;cursor:pointer;box-shadow:0 14px 28px rgba(2,132,199,.22)}.warning,.error{padding:13px;border-radius:16px;margin-bottom:14px;font-weight:850}.warning{background:#fff7ed;color:#c2410c;border:1px solid #fed7aa}.error{background:#fff1f2;color:#be123c;border:1px solid #fecdd3}.brand{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;background:#e0f2fe;color:#0369a1;font-weight:950;font-size:12px;margin-bottom:16px}</style></head><body><main class="card"><div class="brand">● Protected Backend</div><h1>CivicFlow AI</h1><p>Secure admin dashboard for reports and emergency live tracking.</p>${!ADMIN_PASSWORD ? `<div class="warning">ADMIN_PASSWORD is not set in Render Environment yet.</div>` : ""}${message ? `<div class="error">${escapeHtml(message)}</div>` : ""}<form method="POST" action="/dashboard-login"><label>Admin Password</label><input name="password" type="password" placeholder="Enter password"><button type="submit">Open Dashboard</button></form></main></body></html>`;
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CivicFlow AI Admin Login</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(135deg,#f8fafc,#e0f2fe);color:#0f172a;font-family:Inter,Arial,sans-serif;padding:20px}.card{width:100%;max-width:460px;background:#fff;border:1px solid #e2e8f0;border-radius:30px;padding:30px;box-shadow:0 24px 70px rgba(15,23,42,.12)}h1{margin:0 0 8px;font-size:32px}p{color:#64748b;line-height:1.55}label{font-size:13px;color:#475569;font-weight:900;letter-spacing:.08em;text-transform:uppercase}input{width:100%;margin-top:8px;padding:15px;border-radius:16px;border:1px solid #dbe3ef;background:#f8fafc;color:#0f172a;outline:none;font-weight:800}button{width:100%;margin-top:16px;padding:15px;border:0;border-radius:999px;background:#0284c7;color:#fff;font-weight:950;cursor:pointer}.warning,.error{padding:13px;border-radius:16px;margin-bottom:14px;font-weight:850}.warning{background:#fff7ed;color:#c2410c;border:1px solid #fed7aa}.error{background:#fff1f2;color:#be123c;border:1px solid #fecdd3}.brand{display:inline-flex;padding:8px 12px;border-radius:999px;background:#e0f2fe;color:#0369a1;font-weight:950;font-size:12px;margin-bottom:16px}</style></head><body><main class="card"><div class="brand">● Protected Backend</div><h1>CivicFlow AI</h1><p>Secure admin dashboard for reports and emergency live tracking.</p>${!ADMIN_PASSWORD ? `<div class="warning">ADMIN_PASSWORD is not set in Render Environment yet.</div>` : ""}${message ? `<div class="error">${escapeHtml(message)}</div>` : ""}<form method="POST" action="/dashboard-login"><label>Admin Password</label><input name="password" type="password" placeholder="Enter password"><button type="submit">Open Dashboard</button></form></main></body></html>`;
 }
 
 async function handleDashboardLogin(req, res) {
@@ -808,7 +926,6 @@ function handleDashboardLogout(req, res) {
 
 async function handleUpdateReportStatus(req, res) {
   if (!isDashboardAuthorized(req)) return sendHtml(res, buildDashboardLoginPage("Please login first."), 401);
-
   try {
     const form = await readFormBody(req);
     await updateReportStatus(String(form.get("reportId") || ""), String(form.get("status") || ""), String(form.get("adminNote") || ""));
@@ -819,7 +936,7 @@ async function handleUpdateReportStatus(req, res) {
 }
 
 function buildDashboardCss() {
-  return `<style>:root{--bg:#f5f8fc;--panel:#fff;--ink:#0f172a;--muted:#64748b;--line:#e5edf6;--primary:#0284c7;--green:#16a34a;--red:#e11d48}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,Arial,sans-serif;letter-spacing:-.01em}.layout{display:grid;grid-template-columns:280px 1fr;min-height:100vh}aside{background:linear-gradient(180deg,#fff 0%,#f8fbff 100%);border-right:1px solid var(--line);padding:24px;position:sticky;top:0;height:100vh;overflow:auto}main{padding:28px 30px 44px;max-width:1680px;width:100%;margin:0 auto}h1{font-size:32px;margin:0 0 8px;letter-spacing:-.045em}h2{font-size:22px;margin:0 0 14px;letter-spacing:-.035em}h3{font-size:17px;margin:12px 0 14px}p{color:var(--muted);line-height:1.55;margin:0}.brand-pill,.pill,.badge{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;font-size:12px;font-weight:950;white-space:nowrap}.brand-pill{padding:8px 12px;background:#e0f2fe;color:#0369a1;margin-bottom:18px}.pill{padding:7px 11px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}.badge{padding:7px 10px;margin-right:6px}.badge.normal{background:#e0f2fe;color:#0369a1}.badge.emergency{background:#ffe4e6;color:#be123c}.badge.live{background:#dcfce7;color:#15803d}.badge.expired{background:#f1f5f9;color:#475569}.badge.stopped{background:#fef3c7;color:#b45309}.side-title{font-size:28px;margin:0 0 8px;letter-spacing:-.045em}.side-caption{font-size:14px;margin-bottom:20px}.side-card,.stat,.section,.report,.live,.mini,.gps,.text{background:var(--panel);border:1px solid var(--line);border-radius:22px;box-shadow:0 8px 22px rgba(15,23,42,.035)}.side-card{padding:14px 15px;margin:11px 0}.side-card span,.mini span,.gps span,.text span{display:block;color:#64748b;text-transform:uppercase;font-size:10.5px;letter-spacing:.12em;font-weight:950;margin-bottom:7px}.side-card b,.mini b{font-size:14px}.good{background:#f0fdf4;border-color:#bbf7d0}.bad{background:#fff1f2;border-color:#fecdd3}.blue{background:#eff6ff;border-color:#bfdbfe}.topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.page-title-block{max-width:720px}.toolbar{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.tabs{display:inline-flex;gap:6px;padding:5px;background:#eaf1f8;border:1px solid #dbe7f3;border-radius:999px}.tab{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border-radius:999px;padding:10px 15px;font-size:13px;font-weight:950;color:#475569}.tab.active{background:#fff;color:#0369a1;box-shadow:0 6px 16px rgba(15,23,42,.08)}.actions{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}.actions form{margin:0;display:flex}.button{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border:0;border-radius:999px;padding:0 16px;min-height:42px;height:42px;width:auto;max-width:max-content;line-height:1;font-weight:950;cursor:pointer;background:var(--primary);color:#fff;white-space:nowrap;box-shadow:0 10px 22px rgba(2,132,199,.18)}.button.dark{background:#fff;color:#0f172a;border:1px solid var(--line);box-shadow:0 8px 20px rgba(15,23,42,.05)}.button.logout{background:#fff1f2;color:#be123c;border:1px solid #fecdd3;box-shadow:none}.button.green{background:#16a34a;box-shadow:0 10px 22px rgba(22,163,74,.16)}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:18px 0 22px}.stat{padding:18px;position:relative;overflow:hidden}.stat:before{content:"";position:absolute;right:-30px;top:-30px;width:92px;height:92px;border-radius:50%;background:#e0f2fe}.stat b{display:block;font-size:32px;line-height:1;color:var(--primary);position:relative}.stat strong{display:block;margin-top:7px;font-size:13px;color:#334155;position:relative}.stat.red:before{background:#ffe4e6}.stat.red b{color:var(--red)}.stat.green:before{background:#dcfce7}.stat.green b{color:var(--green)}.section{padding:20px;margin-bottom:20px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px}.report,.live{padding:18px;margin-bottom:16px}.report.emergency{border-color:#fecdd3}.card-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;border-bottom:1px solid #edf2f7;padding-bottom:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.mini,.gps,.text{padding:13px;margin-top:10px}.gps{background:#f0f9ff;border-color:#bae6fd}.gps.green-panel{background:#f0fdf4;border-color:#bbf7d0}.text{box-shadow:none}.action{background:#f0fdf4;border-color:#bbf7d0}.empty{padding:28px;border:1px dashed #b9c8d8;border-radius:22px;text-align:center;color:#64748b;background:#f8fafc;font-weight:850}.notice{padding:14px 16px;border-radius:18px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;font-weight:850}select,textarea{width:100%;margin-top:8px;border-radius:14px;border:1px solid #dbe3ef;background:#fff;color:#0f172a;padding:12px;font-weight:750;outline:none}textarea{min-height:72px;resize:vertical}select:focus,textarea:focus{border-color:#38bdf8;box-shadow:0 0 0 4px rgba(56,189,248,.14)}.admin-form{margin-top:14px;padding:14px;border-radius:18px;background:#f8fafc;border:1px solid #e8eef6}details.history{margin-top:18px}details.history summary{cursor:pointer;color:#334155;font-weight:950;padding:16px;border-radius:20px;background:#fff;border:1px solid var(--line);box-shadow:0 8px 22px rgba(15,23,42,.035)}@media(max-width:1100px){.layout{grid-template-columns:1fr}aside{position:relative;height:auto}.stats,.grid{grid-template-columns:1fr}.topbar{flex-direction:column}.toolbar{justify-content:flex-start}.actions{justify-content:flex-start}}@media(max-width:620px){main{padding:20px}.tabs,.toolbar,.actions{width:100%}.tab,.button{flex:1;max-width:none}.stats{gap:10px}h1{font-size:27px}.side-title{font-size:24px}}</style>`;
+  return `<style>:root{--bg:#f5f8fc;--panel:#fff;--ink:#0f172a;--muted:#64748b;--line:#e5edf6;--primary:#0284c7;--green:#16a34a;--red:#e11d48}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,Arial,sans-serif}.layout{display:grid;grid-template-columns:280px 1fr;min-height:100vh}aside{background:#fff;border-right:1px solid var(--line);padding:24px;position:sticky;top:0;height:100vh;overflow:auto}main{padding:28px 30px 44px;max-width:1680px;width:100%;margin:0 auto}h1{font-size:32px;margin:0 0 8px}h2{font-size:22px;margin:0 0 14px}p{color:var(--muted);line-height:1.55;margin:0}.pill,.badge{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;font-size:12px;font-weight:950}.pill{padding:7px 11px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}.badge{padding:7px 10px;margin-right:6px}.badge.normal{background:#e0f2fe;color:#0369a1}.badge.emergency{background:#ffe4e6;color:#be123c}.badge.live{background:#dcfce7;color:#15803d}.badge.expired{background:#f1f5f9;color:#475569}.badge.stopped{background:#fef3c7;color:#b45309}.brand-pill{display:inline-flex;padding:8px 12px;border-radius:999px;background:#e0f2fe;color:#0369a1;font-weight:950;font-size:12px;margin-bottom:18px}.side-title{font-size:28px;margin:0 0 8px}.side-card,.stat,.section,.report,.live,.mini,.gps,.text{background:var(--panel);border:1px solid var(--line);border-radius:22px;box-shadow:0 8px 22px rgba(15,23,42,.035)}.side-card{padding:14px 15px;margin:11px 0}.side-card span,.mini span,.gps span,.text span{display:block;color:#64748b;text-transform:uppercase;font-size:10.5px;letter-spacing:.12em;font-weight:950;margin-bottom:7px}.good{background:#f0fdf4;border-color:#bbf7d0}.bad{background:#fff1f2;border-color:#fecdd3}.blue{background:#eff6ff;border-color:#bfdbfe}.topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.toolbar{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.tabs{display:inline-flex;gap:6px;padding:5px;background:#eaf1f8;border:1px solid #dbe7f3;border-radius:999px}.tab{display:inline-flex;text-decoration:none;border-radius:999px;padding:10px 15px;font-size:13px;font-weight:950;color:#475569}.tab.active{background:#fff;color:#0369a1;box-shadow:0 6px 16px rgba(15,23,42,.08)}.actions{display:inline-flex;gap:8px;flex-wrap:wrap}.actions form{margin:0}.button{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border:0;border-radius:999px;padding:0 16px;min-height:42px;font-weight:950;cursor:pointer;background:var(--primary);color:#fff;white-space:nowrap}.button.dark{background:#fff;color:#0f172a;border:1px solid var(--line)}.button.logout{background:#fff1f2;color:#be123c;border:1px solid #fecdd3}.button.green{background:#16a34a}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:18px 0 22px}.stat{padding:18px}.stat b{display:block;font-size:32px;color:var(--primary)}.stat.red b{color:var(--red)}.stat.green b{color:var(--green)}.section{padding:20px;margin-bottom:20px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px}.report,.live{padding:18px;margin-bottom:16px}.report.emergency{border-color:#fecdd3}.card-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;border-bottom:1px solid #edf2f7;padding-bottom:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.mini,.gps,.text{padding:13px;margin-top:10px}.gps{background:#f0f9ff;border-color:#bae6fd}.gps.green-panel{background:#f0fdf4;border-color:#bbf7d0}.action{background:#f0fdf4;border-color:#bbf7d0}.empty{padding:28px;border:1px dashed #b9c8d8;border-radius:22px;text-align:center;color:#64748b;background:#f8fafc;font-weight:850}.notice{padding:14px 16px;border-radius:18px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;font-weight:850}select,textarea{width:100%;margin-top:8px;border-radius:14px;border:1px solid #dbe3ef;background:#fff;color:#0f172a;padding:12px;font-weight:750;outline:none}textarea{min-height:72px}.admin-form{margin-top:14px;padding:14px;border-radius:18px;background:#f8fafc;border:1px solid #e8eef6}details.history summary{cursor:pointer;color:#334155;font-weight:950;padding:16px;border-radius:20px;background:#fff;border:1px solid var(--line)}@media(max-width:1100px){.layout{grid-template-columns:1fr}aside{position:relative;height:auto}.stats,.grid{grid-template-columns:1fr}.topbar{flex-direction:column}.toolbar{justify-content:flex-start}}</style>`;
 }
 
 function buildStorageBox(storage, firebaseErrorValue) {
@@ -828,7 +945,7 @@ function buildStorageBox(storage, firebaseErrorValue) {
 }
 
 function buildDashboardSidebar({ latest, total, emergency, normal, activeLive, storage, firebaseErrorValue }) {
-  return `<aside><div class="brand-pill">● Protected Backend</div><h1 class="side-title">CivicFlow AI</h1><p class="side-caption">Admin command center for reports and live emergency tracking.</p><div class="side-card blue"><span>AI Mode</span><b>${GEMINI_API_KEY ? "Gemini Ready" : "Fallback Only"}</b></div><div class="side-card"><span>Model</span><b>${escapeHtml(GEMINI_MODEL)}</b></div>${buildStorageBox(storage, firebaseErrorValue)}<div class="side-card"><span>Latest Report</span><b>${escapeHtml(latest)}</b></div><div class="side-card"><span>Total Reports</span><b>${total}</b></div><div class="side-card bad"><span>Emergency Routes</span><b>${emergency}</b></div><div class="side-card"><span>Normal Routes</span><b>${normal}</b></div><div class="side-card good"><span>Live Tracking</span><b>${activeLive} active session(s)</b></div></aside>`;
+  return `<aside><div class="brand-pill">● Protected Backend</div><h1 class="side-title">CivicFlow AI</h1><p>Admin command center for reports and live emergency tracking.</p><div class="side-card blue"><span>AI Mode</span><b>${GEMINI_API_KEY ? "Gemini Ready" : "Fallback Only"}</b></div><div class="side-card"><span>Gemini Model</span><b>${escapeHtml(GEMINI_MODEL)}</b></div><div class="side-card ${isAzureSpeechConfigured() ? "good" : "bad"}"><span>Azure Speech</span><b>${isAzureSpeechConfigured() ? `Enabled • ${escapeHtml(AZURE_SPEECH_REGION)}` : "Not configured"}</b></div>${buildStorageBox(storage, firebaseErrorValue)}<div class="side-card"><span>Latest Report</span><b>${escapeHtml(latest)}</b></div><div class="side-card"><span>Total Reports</span><b>${total}</b></div><div class="side-card bad"><span>Emergency Routes</span><b>${emergency}</b></div><div class="side-card"><span>Normal Routes</span><b>${normal}</b></div><div class="side-card good"><span>Live Tracking</span><b>${activeLive} active session(s)</b></div></aside>`;
 }
 
 function buildTopActions(activePage, refreshPath) {
@@ -841,12 +958,11 @@ function buildStats(total, emergency, normal, activeLive) {
 
 function buildDashboardLayout({ title, subtitle, activePage, refreshPath, autoRefreshSeconds, sidebar, stats, content }) {
   const metaRefresh = autoRefreshSeconds ? `<meta http-equiv="refresh" content="${autoRefreshSeconds}">` : "";
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">${metaRefresh}<title>${escapeHtml(title)}</title>${buildDashboardCss()}</head><body><div class="layout">${sidebar}<main><div class="topbar"><div class="page-title-block"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(subtitle)}</p></div>${buildTopActions(activePage, refreshPath)}</div>${stats}${content}</main></div></body></html>`;
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">${metaRefresh}<title>${escapeHtml(title)}</title>${buildDashboardCss()}</head><body><div class="layout">${sidebar}<main><div class="topbar"><div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(subtitle)}</p></div>${buildTopActions(activePage, refreshPath)}</div>${stats}${content}</main></div></body></html>`;
 }
 
 async function handleReportsDashboard(req, res) {
   if (!isDashboardAuthorized(req)) return sendHtml(res, buildDashboardLoginPage("Please login first."), 401);
-
   const loadResult = await loadReports();
   const reports = loadResult.reports;
   const liveSessions = await loadLiveSessions(50);
@@ -863,7 +979,6 @@ async function handleReportsDashboard(req, res) {
 
 async function handleLiveDashboard(req, res) {
   if (!isDashboardAuthorized(req)) return sendHtml(res, buildDashboardLoginPage("Please login first."), 401);
-
   const loadResult = await loadReports();
   const reports = loadResult.reports;
   const liveSessions = await loadLiveSessions(100);
@@ -881,14 +996,13 @@ async function handleLiveDashboard(req, res) {
   sendHtml(res, buildDashboardLayout({ title: "Live Emergency Tracking", subtitle: "Focused monitoring page for emergency live location sessions.", activePage: "live", refreshPath: "/dashboard/live", autoRefreshSeconds: 10, sidebar, stats: buildStats(total, emergency, normal, activeLive), content }));
 }
 
-function buildReportCard(item, index, liveSessions, showLiveMini = false) {
+function buildReportCard(item, index, liveSessions) {
   const r = item.report || {};
   const isE = Boolean(r.isEmergency);
   const live = item.liveSessionId ? liveSessions.find((s) => s.id === item.liveSessionId) : liveSessions.find((s) => String(s.reportId) === String(item.id));
   const liveStatus = live ? getLiveSessionComputedStatus(live) : null;
   const help = r.helplineLabel && r.helplineNumber ? `${r.helplineLabel} • ${r.helplineNumber}` : "No helpline selected";
-
-  return `<article class="report ${isE ? "emergency" : ""}"><div class="card-head"><div><span class="badge ${isE ? "emergency" : "normal"}">${isE ? "Emergency" : "Normal"}</span>${liveStatus ? `<span class="badge ${liveStatus === "active" ? "live" : liveStatus === "stopped" ? "stopped" : "expired"}">Live ${escapeHtml(liveStatus)}</span>` : ""}<span style="color:#64748b;font-weight:950">#${index + 1}</span><h2>${escapeHtml(r.category || "Citizen Report")}</h2></div><b style="color:#64748b">${escapeHtml(formatDateTime(item.createdAt))}</b></div><div class="grid"><div class="mini"><span>Status</span><b>${escapeHtml(item.status || "Received")}</b></div><div class="mini"><span>Source</span><b>${escapeHtml(item.source || "flutter-app")}</b></div><div class="mini"><span>Area</span><b>${escapeHtml(r.location || "Current user area")}</b></div><div class="mini"><span>Help</span><b>${escapeHtml(help)}</b></div></div>${buildGpsBlock(r)}${showLiveMini && live ? buildLiveMiniBlock(live) : ""}<div class="text"><span>Transcript</span>${escapeHtml(item.transcript || "No transcript")}</div><div class="text"><span>AI Summary</span>${escapeHtml(r.summary || "No summary")}</div><div class="text action"><span>Recommended Action</span>${escapeHtml(r.recommendedAction || "No action")}</div><form method="POST" action="/dashboard/update-status" class="admin-form"><input type="hidden" name="reportId" value="${escapeHtml(item.id)}"><label><b>Update Status</b></label><select name="status">${buildStatusOptions(item.status)}</select><label style="display:block;margin-top:10px"><b>Admin Note</b></label><textarea name="adminNote" placeholder="Write admin note or action taken...">${escapeHtml(item.adminNote || "")}</textarea><button class="button" type="submit" style="margin-top:10px">Save Status</button></form><p style="font-size:12px;color:#94a3b8;margin-top:10px"><b>ID:</b> ${escapeHtml(item.id)}</p></article>`;
+  return `<article class="report ${isE ? "emergency" : ""}"><div class="card-head"><div><span class="badge ${isE ? "emergency" : "normal"}">${isE ? "Emergency" : "Normal"}</span>${liveStatus ? `<span class="badge ${liveStatus === "active" ? "live" : liveStatus === "stopped" ? "stopped" : "expired"}">Live ${escapeHtml(liveStatus)}</span>` : ""}<span style="color:#64748b;font-weight:950">#${index + 1}</span><h2>${escapeHtml(r.category || "Citizen Report")}</h2></div><b style="color:#64748b">${escapeHtml(formatDateTime(item.createdAt))}</b></div><div class="grid"><div class="mini"><span>Status</span><b>${escapeHtml(item.status || "Received")}</b></div><div class="mini"><span>Source</span><b>${escapeHtml(item.source || "flutter-app")}</b></div><div class="mini"><span>Area</span><b>${escapeHtml(r.location || "Current user area")}</b></div><div class="mini"><span>Help</span><b>${escapeHtml(help)}</b></div></div>${buildGpsBlock(r)}${live ? buildLiveMiniBlock(live) : ""}<div class="text"><span>Transcript</span>${escapeHtml(item.transcript || "No transcript")}</div><div class="text"><span>AI Summary</span>${escapeHtml(r.summary || "No summary")}</div><div class="text action"><span>Recommended Action</span>${escapeHtml(r.recommendedAction || "No action")}</div><form method="POST" action="/dashboard/update-status" class="admin-form"><input type="hidden" name="reportId" value="${escapeHtml(item.id)}"><label><b>Update Status</b></label><select name="status">${buildStatusOptions(item.status)}</select><label style="display:block;margin-top:10px"><b>Admin Note</b></label><textarea name="adminNote" placeholder="Write admin note or action taken...">${escapeHtml(item.adminNote || "")}</textarea><button class="button" type="submit" style="margin-top:10px">Save Status</button></form><p style="font-size:12px;color:#94a3b8;margin-top:10px"><b>ID:</b> ${escapeHtml(item.id)}</p></article>`;
 }
 
 function buildGpsBlock(r) {
@@ -909,16 +1023,14 @@ function buildLiveSessionCard(s) {
   const url = loc.mapsUrl || (loc.latitude && loc.longitude ? `https://www.google.com/maps?q=${loc.latitude},${loc.longitude}` : "");
   const status = getLiveSessionComputedStatus(s);
   const statusClass = status === "active" ? "live" : status === "stopped" ? "stopped" : "expired";
-  return `<article class="live"><div class="card-head"><div><span class="badge ${statusClass}">${escapeHtml(status)}</span><h3>Live Session ${escapeHtml(s.id)}</h3></div>${url ? `<a class="button green" href="${escapeHtml(url)}" target="_blank">Open Latest Location</a>` : ""}</div><div class="grid"><div class="mini"><span>Report ID</span><b>${escapeHtml(s.reportId || "Unknown")}</b></div><div class="mini"><span>Started</span><b>${escapeHtml(formatDateTime(s.startedAtIso))}</b></div><div class="mini"><span>Expires</span><b>${escapeHtml(formatDateTime(s.expiresAtIso))}</b></div><div class="mini"><span>Updates</span><b>${escapeHtml(s.updateCount || 0)}</b></div></div>${loc.latitude && loc.longitude ? `<div class="gps green-panel"><span>Latest Live Location</span><b>Latitude: ${escapeHtml(loc.latitude)}<br>Longitude: ${escapeHtml(loc.longitude)}<br>GPS Accuracy: about ${escapeHtml(loc.accuracyMeters || "unknown")} meters</b>${s.lastLocationAtIso ? `<br><span style="margin-top:8px;text-transform:none;letter-spacing:0;color:#475569">Last update: ${escapeHtml(formatDateTime(s.lastLocationAtIso))}</span>` : ""}</div>` : `<div class="empty">No live location point saved for this session yet.</div>`}${s.stopReason ? `<div class="text"><span>Stop Reason</span>${escapeHtml(s.stopReason)}</div>` : ""}</article>`;
+  return `<article class="live"><div class="card-head"><div><span class="badge ${statusClass}">${escapeHtml(status)}</span><h2>Live Session ${escapeHtml(s.id)}</h2></div>${url ? `<a class="button green" href="${escapeHtml(url)}" target="_blank">Open Latest Location</a>` : ""}</div><div class="grid"><div class="mini"><span>Report ID</span><b>${escapeHtml(s.reportId || "Unknown")}</b></div><div class="mini"><span>Started</span><b>${escapeHtml(formatDateTime(s.startedAtIso))}</b></div><div class="mini"><span>Expires</span><b>${escapeHtml(formatDateTime(s.expiresAtIso))}</b></div><div class="mini"><span>Updates</span><b>${escapeHtml(s.updateCount || 0)}</b></div></div>${loc.latitude && loc.longitude ? `<div class="gps green-panel"><span>Latest Live Location</span><b>Latitude: ${escapeHtml(loc.latitude)}<br>Longitude: ${escapeHtml(loc.longitude)}<br>GPS Accuracy: about ${escapeHtml(loc.accuracyMeters || "unknown")} meters</b>${s.lastLocationAtIso ? `<br><span style="margin-top:8px;text-transform:none;letter-spacing:0;color:#475569">Last update: ${escapeHtml(formatDateTime(s.lastLocationAtIso))}</span>` : ""}</div>` : `<div class="empty">No live location point saved for this session yet.</div>`}${s.stopReason ? `<div class="text"><span>Stop Reason</span>${escapeHtml(s.stopReason)}</div>` : ""}</article>`;
 }
 
 async function routeRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-  const path = url.pathname;
+  const pathName = url.pathname;
 
-  if (req.method === "OPTIONS") {
-    return sendJson(res, 200, { ok: true });
-  }
+  if (req.method === "OPTIONS") return sendJson(res, 200, { ok: true });
 
   const trailingSlashRedirects = {
     "/dashboard/": "/dashboard",
@@ -927,104 +1039,33 @@ async function routeRequest(req, res) {
     "/dashboard-login/": "/dashboard-login",
   };
 
-  if (req.method === "GET" && trailingSlashRedirects[path]) {
-    return redirect(res, trailingSlashRedirects[path]);
-  }
+  if (req.method === "GET" && trailingSlashRedirects[pathName]) return redirect(res, trailingSlashRedirects[pathName]);
 
   try {
-    if (req.method === "GET" && ["/", "/health", "/api/health"].includes(path)) {
-      return sendJson(res, 200, {
-        ok: true,
-        service: "CivicFlow AI Backend",
-        aiMode: GEMINI_API_KEY ? "gemini-ready" : "fallback-only",
-        model: GEMINI_MODEL,
-        firebaseStatus,
-        firebaseError,
-        time: new Date().toISOString(),
-      });
+    if (req.method === "GET" && ["/", "/health", "/api/health"].includes(pathName)) {
+      return sendJson(res, 200, { ok: true, service: "CivicFlow AI Backend", aiMode: GEMINI_API_KEY ? "gemini-ready" : "fallback-only", model: GEMINI_MODEL, geminiTimeoutMs: GEMINI_TIMEOUT_MS, azureSpeechEnabled: isAzureSpeechConfigured(), azureSpeechRegion: AZURE_SPEECH_REGION || null, firebaseStatus, firebaseError, time: new Date().toISOString() });
     }
-
-    if (req.method === "POST" && path === "/api/civicflow/analyze-text") {
-      return await handleAnalyzeText(req, res);
-    }
-
-    if (req.method === "POST" && path === "/api/civicflow/analyze-audio") {
-      return await handleAnalyzeAudio(req, res);
-    }
-
-    if (
-      req.method === "POST" &&
-      ["/api/civicflow/reports", "/api/reports"].includes(path)
-    ) {
-      return await handleSubmitReport(req, res);
-    }
-
-    if (
-      req.method === "GET" &&
-      ["/api/civicflow/reports", "/api/reports"].includes(path)
-    ) {
-      return await handleListReports(req, res);
-    }
-
-    if (req.method === "GET" && path === "/api/civicflow/admin/reports-json") {
-      return await handleAdminReportsJson(req, res);
-    }
-
-    if (req.method === "POST" && path === "/api/civicflow/live-location/start") {
-      return await handleLiveTrackingStart(req, res);
-    }
-
-    if (req.method === "POST" && path === "/api/civicflow/live-location/update") {
-      return await handleLiveTrackingUpdate(req, res);
-    }
-
-    if (req.method === "POST" && path === "/api/civicflow/live-location/stop") {
-      return await handleLiveTrackingStop(req, res);
-    }
-
-    if (req.method === "GET" && path === "/api/civicflow/live-location/sessions") {
-      return await handleLiveTrackingList(req, res);
-    }
-
-    if (req.method === "GET" && path === "/api/civicflow/test") {
-      return await handleTest(req, res, url);
-    }
-
-    if (req.method === "GET" && path === "/dashboard-login") {
-      return sendHtml(res, buildDashboardLoginPage());
-    }
-
-    if (req.method === "POST" && path === "/dashboard-login") {
-      return await handleDashboardLogin(req, res);
-    }
-
-    if (req.method === "POST" && path === "/dashboard-logout") {
-      return handleDashboardLogout(req, res);
-    }
-
-    if (req.method === "POST" && path === "/dashboard/update-status") {
-      return await handleUpdateReportStatus(req, res);
-    }
-
-    if (req.method === "GET" && path === "/dashboard") {
-      return await handleReportsDashboard(req, res);
-    }
-
-    if (req.method === "GET" && path === "/dashboard/reports") {
-      return await handleReportsDashboard(req, res);
-    }
-
-    if (req.method === "GET" && path === "/dashboard/live") {
-      return await handleLiveDashboard(req, res);
-    }
-
-    sendJson(res, 404, { ok: false, error: "Route not found.", path });
+    if (req.method === "POST" && pathName === "/api/civicflow/analyze-text") return await handleAnalyzeText(req, res);
+    if (req.method === "POST" && pathName === "/api/civicflow/analyze-audio") return await handleAnalyzeAudio(req, res);
+    if (req.method === "POST" && ["/api/civicflow/reports", "/api/reports"].includes(pathName)) return await handleSubmitReport(req, res);
+    if (req.method === "GET" && ["/api/civicflow/reports", "/api/reports"].includes(pathName)) return await handleListReports(req, res);
+    if (req.method === "GET" && pathName === "/api/civicflow/admin/reports-json") return await handleAdminReportsJson(req, res);
+    if (req.method === "POST" && pathName === "/api/civicflow/live-location/start") return await handleLiveTrackingStart(req, res);
+    if (req.method === "POST" && pathName === "/api/civicflow/live-location/update") return await handleLiveTrackingUpdate(req, res);
+    if (req.method === "POST" && pathName === "/api/civicflow/live-location/stop") return await handleLiveTrackingStop(req, res);
+    if (req.method === "GET" && pathName === "/api/civicflow/live-location/sessions") return await handleLiveTrackingList(req, res);
+    if (req.method === "GET" && pathName === "/api/civicflow/test") return await handleTest(req, res, url);
+    if (req.method === "GET" && pathName === "/dashboard-login") return sendHtml(res, buildDashboardLoginPage());
+    if (req.method === "POST" && pathName === "/dashboard-login") return await handleDashboardLogin(req, res);
+    if (req.method === "POST" && pathName === "/dashboard-logout") return handleDashboardLogout(req, res);
+    if (req.method === "POST" && pathName === "/dashboard/update-status") return await handleUpdateReportStatus(req, res);
+    if (req.method === "GET" && pathName === "/dashboard") return await handleReportsDashboard(req, res);
+    if (req.method === "GET" && pathName === "/dashboard/reports") return await handleReportsDashboard(req, res);
+    if (req.method === "GET" && pathName === "/dashboard/live") return await handleLiveDashboard(req, res);
+    sendJson(res, 404, { ok: false, error: "Route not found.", path: pathName });
   } catch (error) {
     console.error("Unhandled request error:", error);
-    sendJson(res, 500, {
-      ok: false,
-      error: error.message || "Internal server error.",
-    });
+    sendJson(res, 500, { ok: false, error: error.message || "Internal server error." });
   }
 }
 
@@ -1032,4 +1073,6 @@ http.createServer((req, res) => {
   routeRequest(req, res);
 }).listen(PORT, () => {
   console.log(`CivicFlow AI backend running on port ${PORT}`);
+  console.log(`Gemini model: ${GEMINI_MODEL}`);
+  console.log(`Azure Speech fallback: ${isAzureSpeechConfigured() ? `enabled (${AZURE_SPEECH_REGION})` : "disabled"}`);
 });
